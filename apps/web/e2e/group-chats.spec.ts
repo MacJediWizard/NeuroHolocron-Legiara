@@ -121,6 +121,7 @@ test("create group from + and see two bots in one transcript", async ({ page }, 
   await expect(desktopSettings.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   await page.unroute("**/rpc/groups/update");
   await desktopSettings.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(desktopSettings).not.toBeVisible();
 
   await page
     .getByRole("combobox", { name: "Message Draft team" })
@@ -201,7 +202,11 @@ test("create group from + and see two bots in one transcript", async ({ page }, 
   const replyButton = firstMessage.getByRole("button", { name: "Reply" });
   await expect(replyButton).toBeVisible();
   await replyButton.click();
-  await expect(page.getByTestId("reply-chip")).toContainText(/Replying to/);
+  const excerpt = await firstMessage.getByTestId("message-user-bubble").innerText();
+  await expect(page.getByTestId("reply-chip")).toContainText(`You: ${excerpt.split(/\r?\n/u)[0]}`);
+  await expect(
+    page.getByTestId("reply-chip").getByRole("button", { name: "Cancel reply" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Cancel reply" }).click();
 
   let releaseReviewSnapshot!: () => void;
@@ -257,6 +262,19 @@ test("create group from + and see two bots in one transcript", async ({ page }, 
   await expect(settings).toHaveAttribute("data-panel", "group-settings");
   expect((await settings.boundingBox())?.width).toBeLessThanOrEqual(390);
   await captureScreenshot(page, testInfo, "group-settings-mobile");
+  await settings.getByRole("button", { name: "Delete group", exact: true }).click();
+  const confirmDelete = page.getByRole("alertdialog", { name: "Delete Draft team?" });
+  await expect(confirmDelete).toBeVisible();
+  await captureScreenshot(page, testInfo, "group-settings-delete-confirm-mobile");
+  await page.keyboard.press("Escape");
+  await expect(confirmDelete).toHaveCount(0);
+  await expect(settings).toHaveAttribute("data-panel", "group-settings");
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveAttribute("data-panel", "closed");
+  await page.getByTestId("bot-settings-trigger").click();
+  await settings.getByRole("button", { name: "Close panel", exact: true }).click();
+  await expect(settings).toHaveAttribute("data-panel", "closed");
+  await expect(page.getByRole("combobox", { name: "Message Draft team" })).toBeVisible();
 
   await rpc(page, "groups/remove", { groupId: reviewGroup.id });
   await page.goto(`/app/g/${reviewGroup.id}`);

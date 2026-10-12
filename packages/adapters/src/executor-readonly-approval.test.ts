@@ -60,6 +60,7 @@ function fixture({
   },
   shutdownSignal,
   builtin = false,
+  disabledBuiltinTools = [],
   existingSharedMemory,
   advanceRevisionAfterRead = false,
   approvalTarget,
@@ -69,6 +70,7 @@ function fixture({
   /** Runs the scripted tool calls concurrently, like a model emitting several in one turn. */
   parallel?: boolean;
   builtin?: boolean;
+  disabledBuiltinTools?: string[];
   existingSharedMemory?: string;
   /** Simulates another writer landing between the save's read and its commit. */
   advanceRevisionAfterRead?: boolean;
@@ -208,6 +210,7 @@ function fixture({
         name: bot.name,
         title: bot.title,
         description: bot.description,
+        disabledBuiltinTools,
         computerId: "computer-1",
         computer: { id: "computer-1", scope: "dedicated" },
       })),
@@ -232,6 +235,7 @@ function fixture({
     },
     taughtSkill: { findMany: vi.fn(async () => []) },
     agentSecret: { findMany: vi.fn(async () => []) },
+    botSecret: { findMany: vi.fn(async () => []) },
     agentSkill: { findMany: vi.fn(async () => []) },
     scratchpadItem: { findMany: vi.fn(async () => []) },
     spaceMember: { findMany: vi.fn(async () => [{ userId: run.userId, role: "owner" }]) },
@@ -341,6 +345,22 @@ function fixture({
     },
   };
 }
+
+describe("disabled builtins", () => {
+  it("refuses a direct call before any effect or memory write", async () => {
+    const f = fixture({
+      name: "save_shared_memory",
+      builtin: true,
+      disabledBuiltinTools: ["save_shared_memory", "unknown"],
+    });
+    f.setCalls([{ args: { content: "Must not be saved" }, executionId: "call-1" }]);
+    await f.run();
+    expect(f.results).toEqual([{ error: "This tool is disabled for this bot." }]);
+    expect(f.commit).not.toHaveBeenCalled();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.effects).toEqual([]);
+  });
+});
 
 describe("connector read-only metadata and approval enforcement", () => {
   beforeEach(() => {

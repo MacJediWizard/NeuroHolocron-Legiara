@@ -25,6 +25,7 @@ import {
   computerObservation,
   normalizeWorkspacePath,
 } from "./computer-support.js";
+import { sandboxCommandArgv } from "./sandbox-command-environment.js";
 import { readBodyCapped, withAbort } from "./web-ssrf.js";
 
 export const MAX_SANDBOX_ERROR_RESPONSE_BYTES = 8 * 1024;
@@ -164,14 +165,23 @@ export class DockerSandboxProvider implements SandboxProvider {
       }
       throw new Error(`sandbox provision failed: ${res.status} ${detail}`.trim());
     }
-    const body = await readSandboxJson<{ id: string; resumed?: boolean }>(res, context.signal);
+    const body = await readSandboxJson<{ id: string; resumed?: boolean; started?: boolean }>(
+      res,
+      context.signal,
+    );
     return {
       id: body.id,
       botId: request.botId,
       kind: "docker",
       providerRef: body.id,
       fresh: body.resumed !== true,
+      ...(body.started === true ? { started: true } : {}),
     };
+  }
+
+  async isRunning(computer: ComputerRef, context: AdapterContext): Promise<boolean> {
+    if (computer.kind !== "docker") return false;
+    return (await this.containerRunning(computer, context)) === true;
   }
 
   async prepare(_computer: ComputerRef, _context: AdapterContext): Promise<void> {}
@@ -187,6 +197,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       headers: { ...this.headers(context, computer.botId), "content-type": "application/json" },
       body: JSON.stringify({
         ...request,
+        argv: sandboxCommandArgv(request),
         cwd: dockerCwd(request.cwd),
         timeoutMs,
       }),
@@ -297,6 +308,10 @@ export class DockerSandboxProvider implements SandboxProvider {
     });
     if (!res.ok) {
       const detail = await safeBody(res, context.signal);
+      // A deleted Docker container is reported by the supervisor as a 400
+      // containing Docker's 404. Preserve the gone signal so lease cleanup can
+      // clear the stale providerRef instead of retrying the same dead container.
+      if (/no such container/i.test(detail)) throw sandboxGoneError(computer);
       if ((await this.containerRunning(computer, context)) === false) {
         // The screen died with its container: a revoke has nothing left to release, while
         // an interactive grant needs the computer booted first.

@@ -14,6 +14,11 @@ export type UserVisibleMessagesOptions = {
   /** Peer-run ids from `run.trigger === "bot_message"` when receipts may be out of window. */
   knownPeerRunIds?: Iterable<string>;
   /**
+   * Run ids for background triggers (e.g. `tickets`). Their messages are hidden
+   * except cards that need user input.
+   */
+  backgroundRunIds?: Iterable<string>;
+  /**
    * Surface a peer-run's own `text` reply (e.g. a delegating bot's summary to the user)
    * alongside `ask` cards. Defaults to true for chat-thread rendering; set false for
    * contexts like sidebar previews that should stay ask-only and never echo peer chatter.
@@ -24,6 +29,16 @@ export type UserVisibleMessagesOptions = {
 export function isPeerReceiptBlocks(blocks: readonly MessageBlock[]): boolean {
   return blocks.some(
     (block) => block.kind === "bot_message_sent" || block.kind === "bot_message_received",
+  );
+}
+
+/** User-input cards remain visible when their run otherwise stays in the background. */
+export function isBackgroundInputBlock(block: unknown): boolean {
+  return (
+    !!block &&
+    typeof block === "object" &&
+    "kind" in block &&
+    (block.kind === "ask" || block.kind === "computer" || block.kind === "mcp_approval")
   );
 }
 
@@ -39,8 +54,12 @@ export function userVisibleMessages<T extends PresentableMessage>(
       .flatMap((message) => (message.runId ? [message.runId] : [])),
   ]);
   const includePeerReceipts = options.includePeerReceipts === true;
+  const backgroundRunIds = new Set(options.backgroundRunIds ?? []);
 
   return messages.filter((message) => {
+    if (message.runId && backgroundRunIds.has(message.runId)) {
+      return message.blocks.some(isBackgroundInputBlock);
+    }
     if (isPeerReceiptBlocks(message.blocks)) return includePeerReceipts;
     if (!message.runId || !peerRunIds.has(message.runId)) return true;
     // Keep peer-run ask cards, and (unless the caller opts out) the bot's own text reply.

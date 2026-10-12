@@ -177,7 +177,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               <Trans>Loading…</Trans>
             </p>
           ) : null}
-          {reset?.sso && mode !== "forgot" ? (
+          {reset?.sso && !reset.passwordAuth && mode !== "forgot" ? (
             <Button
               type="button"
               disabled={pending}
@@ -281,6 +281,18 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                   <Trans>Create account</Trans>
                 )}
               </Button>
+              {reset.sso && mode !== "forgot" ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  disabled={pending}
+                  className="mt-3 text-muted-foreground"
+                  onClick={() => void signInWithSso()}
+                >
+                  <Trans>Continue with {reset.sso.name}</Trans>
+                </Button>
+              ) : null}
               <p className="mt-8 text-muted-foreground">
                 {mode === "in" ? (
                   <>

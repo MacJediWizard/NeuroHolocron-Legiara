@@ -26,7 +26,9 @@ describe("Android mobile platform contract", () => {
     expect(thread).toContain("KeyboardAvoidingView");
     expect(thread).toContain('behavior="height"');
     expect(thread).toContain("useHeaderHeight");
-    expect(thread).toContain("keyboardVerticalOffset={0}");
+    expect(thread).toContain(
+      'keyboardVerticalOffset={Platform.OS === "android" ? nativeHeaderHeight : 0}',
+    );
     expect(thread).not.toContain("automaticOffset");
     expect(thread).not.toContain("KeyboardStickyView");
     expect(thread).toContain("useSafeAreaInsets");
@@ -94,6 +96,7 @@ describe("Android mobile platform contract", () => {
     expect(module).toContain('AsyncFunction("setOpenThread")');
     expect(live).toContain("setOpenNotificationThread");
     expect(thread).toContain("if (!navigation.isFocused() || !notificationThreadId) return");
+    expect(thread).toContain("    }, [botId, notificationThreadId]),\n  );");
     expect(service).toContain(
       "fun clearSession(context: Context) {\n      synchronized(sessionLock)",
     );
@@ -247,16 +250,17 @@ describe("Android mobile platform contract", () => {
 
   it("keeps send and stop separate while steering active work", () => {
     const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
+    const composer = readFileSync(resolve(mobileRoot, "components/thread-composer.tsx"), "utf8");
     const stopStart = thread.indexOf("async function stop()");
     const stopSource = thread.slice(stopStart, thread.indexOf("const answerMessage", stopStart));
     expect(stopStart).toBeGreaterThan(-1);
-    expect(thread).toContain('accessibilityLabel={t("Send")}');
-    expect(thread).toContain('accessibilityLabel={t("Stop")}');
+    expect(composer).toContain('accessibilityLabel={t("Send")}');
+    expect(composer).toContain('accessibilityLabel={t("Stop")}');
     expect(thread).not.toContain("Messages sent now guide the next turn.");
     expect(thread).not.toContain("Steer ");
     expect(thread).not.toContain("steering message");
     expect(thread).toContain('t("Message {name}"');
-    expect(thread).toContain("const clientNonce = newClientNonce()");
+    expect(thread).toContain("feedback.sendAttempt({");
     expect(thread).toContain("Work stopped, but the thread could not refresh");
     expect(stopSource).toContain("const targetBotId = botId;");
     expect(stopSource).toContain("const targetGroupId = groupId;");
@@ -264,10 +268,48 @@ describe("Android mobile platform contract", () => {
       "targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! },",
     );
     expect(stopSource).toMatch(
-      /if \(isCurrentTarget\(targetBotId, targetGroupId\)\) \{\s*setError\(errorText\(err, t\("Failed to stop work"\)\)\);/,
+      /if \(isCurrentTarget\(targetBotId, targetGroupId\)\) \{\s*Alert\.alert\(t\("Failed to stop work"\), errorText\(err, t\("Try again\."\)\)\);/,
     );
     expect(stopSource).toMatch(
       /if \(isCurrentTarget\(targetBotId, targetGroupId\)\) \{\s*(?:const detail = [^\n]+;\s*)?setError\(t\("Work stopped, but the thread could not refresh: \{detail\}", \{ detail \}\)\);/,
+    );
+  });
+
+  it("clears the unchanged composer only after preparing the scoped optimistic send", () => {
+    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
+    const send = thread.slice(
+      thread.indexOf("async function send()"),
+      thread.indexOf("async function deliver"),
+    );
+    expect(send.indexOf("await prepareUnsentSends()")).toBeLessThan(
+      send.indexOf("feedback.sendAttempt("),
+    );
+    expect(send.indexOf("feedback.sendAttempt(")).toBeLessThan(
+      send.indexOf("composerRef.current?.reset()"),
+    );
+    expect(send.indexOf("composerRef.current?.reset()")).toBeLessThan(
+      send.indexOf("await deliver(attempt)"),
+    );
+    expect(send).toContain(
+      "JSON.stringify(submitted) !== JSON.stringify(composerRef.current?.snapshot())",
+    );
+    expect(thread).toContain("onRetry={() => void deliver(attempt, true)}");
+  });
+
+  it("offers Voice settings when speaking has no configured provider", () => {
+    const thread = readFileSync(resolve(mobileRoot, "app/thread.tsx"), "utf8");
+    const speaking = thread.slice(
+      thread.indexOf("void speakQueue(items)"),
+      thread.indexOf("async function startVoiceCall()"),
+    );
+    expect(speaking).toMatch(
+      /if \(!spoken\)\s*Alert\.alert\(t\("Could not speak"\), t\("Add a voice provider in Voice settings\."\), \[\s*\{ text: t\("Cancel"\), style: "cancel" \},\s*\{ text: t\("Open Voice"\), onPress: \(\) => router\.push\("\/voice"\) \},\s*\]\)/,
+    );
+    expect(speaking).toContain(
+      'Alert.alert(t("Could not speak"), errorText(err, t("Try again.")))',
+    );
+    expect(readFileSync(resolve(mobileRoot, "app/(settings)/voice.tsx"), "utf8")).toContain(
+      "export default",
     );
   });
 

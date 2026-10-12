@@ -6,7 +6,8 @@ export const SITE_DESCRIPTION =
 export const GITHUB_URL = "https://github.com/MacJediWizard/NeuroHolocron-Legiara";
 export const GITHUB_API_REPO = "https://api.github.com/repos/MacJediWizard/NeuroHolocron-Legiara";
 export const DOCS_URL = "https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md";
-export const SELF_HOST_SECRETS_URL = "https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host-secrets.md";
+export const SELF_HOST_SECRETS_URL =
+  "https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host-secrets.md";
 export const SELF_HOST_RESTRICTED_URL =
   "https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host-restricted-network.md";
 export const SETUP_PROMPT_URL = "https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/SETUP_PROMPT.md";

@@ -1,5 +1,6 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import { RemoteImagesContext } from "@rakazo/chat-ui/web";
+import type { LinkFavicons } from "@rakazo/chat-ui/web";
+import { LinkFaviconsContext, RemoteImagesContext } from "@rakazo/chat-ui/web";
 import { LOCAL_SETTINGS_PAGE } from "@rakazo/contracts";
 import { Button, Skeleton } from "@rakazo/ui-web";
 import {
@@ -13,10 +14,13 @@ import {
 } from "react";
 import { Navigate, Outlet, Route, Routes, useSearchParams } from "react-router-dom";
 import { LoadingState } from "./components/ai/primitives";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SubscriptionGate } from "./components/SubscriptionGate";
 import { authClient } from "./lib/auth";
+import { getTicketBoardEnabled, subscribeTicketBoardEnabled } from "./lib/bootstrap";
 import { markAfterPaint, markOnce } from "./lib/performance";
 import { getRemoteImagesEnabled, subscribeRemoteImages } from "./lib/remote-images-preference";
+import { rpc } from "./lib/rpc";
 import {
   holdUnreachableGate,
   sessionGate,
@@ -44,6 +48,9 @@ const WelcomePage = lazy(() =>
 const ArtifactsPage = lazy(() =>
   import("./pages/Artifacts").then((module) => ({ default: module.ArtifactsPage })),
 );
+const BoardPage = lazy(() =>
+  import("./pages/Board").then((module) => ({ default: module.BoardPage })),
+);
 
 function SsoCallbackPage() {
   useEffect(() => {
@@ -51,6 +58,11 @@ function SsoCallbackPage() {
   }, []);
   return null;
 }
+
+// Link icons come from our API, which fetches and caches them; the browser never asks the site.
+const linkFavicons: LinkFavicons = {
+  load: (origin) => rpc.links.favicon({ origin }),
+};
 
 export function App() {
   const loadRemoteImages = useSyncExternalStore(
@@ -60,13 +72,17 @@ export function App() {
   );
   return (
     <RemoteImagesContext.Provider value={loadRemoteImages}>
-      {window.location.pathname === SSO_CALLBACK_PATH ? (
-        <SsoCallbackPage />
-      ) : window.location.pathname === LOCAL_SETTINGS_PAGE ? (
-        <LocalSettingsPage />
-      ) : (
-        <SessionApp />
-      )}
+      <LinkFaviconsContext.Provider value={linkFavicons}>
+        <ErrorBoundary fallback={<AppFailed />}>
+          {window.location.pathname === SSO_CALLBACK_PATH ? (
+            <SsoCallbackPage />
+          ) : window.location.pathname === LOCAL_SETTINGS_PAGE ? (
+            <LocalSettingsPage />
+          ) : (
+            <SessionApp />
+          )}
+        </ErrorBoundary>
+      </LinkFaviconsContext.Provider>
     </RemoteImagesContext.Provider>
   );
 }
@@ -75,6 +91,11 @@ function SessionApp() {
   const [searchParams] = useSearchParams();
   const signInDestination =
     searchParams.get("next") === "/integrations/setup" ? "/integrations/setup" : "/app";
+  const ticketBoardEnabled = useSyncExternalStore(
+    subscribeTicketBoardEnabled,
+    getTicketBoardEnabled,
+    () => false,
+  );
   const session = authClient.useSession();
   const gate = sessionGate(session);
   const [holdingUnreachable, setHoldingUnreachable] = useState(false);
@@ -156,6 +177,7 @@ function SessionApp() {
             <Route path="/app/g/:groupId" element={<ShellPage />} />
             <Route path="/app/artifacts" element={<ArtifactsPage />} />
             <Route path="/app/artifacts/:artifactId" element={<ArtifactsPage />} />
+            {ticketBoardEnabled ? <Route path="/app/board" element={<BoardPage />} /> : null}
             <Route path="/app/:botId" element={<ShellPage />} />
           </Route>
         </Routes>
@@ -210,6 +232,31 @@ function SessionUnavailable({ refetch }: { refetch: () => Promise<void> }) {
             }}
           >
             <Trans>Retry now</Trans>
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Last resort for a render failure no inner boundary caught: offer a reload instead of a blank page. */
+function AppFailed() {
+  return (
+    <div
+      className="grid h-full place-items-center bg-background px-6 text-center"
+      data-rakazo-app-state="failed"
+    >
+      <div className="flex flex-col items-center">
+        <p className="text-[13.5px] text-muted-foreground/80">
+          <Trans>Something went wrong. Try again.</Trans>
+        </p>
+        <div className="mt-4">
+          <Button
+            variant="secondary"
+            className="rounded-full"
+            onClick={() => window.location.reload()}
+          >
+            <Trans>Refresh</Trans>
           </Button>
         </div>
       </div>

@@ -35,6 +35,12 @@ Signup and local Docker computers work without an E2B account. Optional remote p
 Compose stack requires `SANDBOX_SUPERVISOR_TOKEN` for every provider; leave it empty and `compose up` fails closed.
 
 Optional: set `OPENROUTER_API_KEY` or connect a model in the UI after signup.
+A provider that authenticates from the host needs no key: for Amazon Bedrock with an ECS task,
+IRSA or EC2 instance role, opt in with `PI_DEFAULT_CREDENTIALS=host` and set
+`PI_DEFAULT_PROVIDER=amazon-bedrock`, `PI_DEFAULT_MODEL` and `AWS_REGION`. With an instance
+role, also complete both steps in [Restricted computer egress](#restricted-computer-egress):
+`SANDBOX_COMPUTER_EGRESS=restricted` alone does not stop bot computers reading the role's
+credentials from the metadata endpoint.
 Auto Review uses that LLM checker by default. To use TypeSafe Jev instead, set
 `RAKAZO_AUTO_REVIEW_PROVIDER=jev` and `TYPESAFE_API_KEY`. Core still runs with neither.
 
@@ -359,7 +365,9 @@ SIGNUP_ALLOWLIST=you@example.com,@company.com
 SANDBOX_PROVIDER=docker   # or none, e2b, daytona, createos, box. Keep fake only for pnpm test.
 AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
-SANDBOX_IDLE_MS=600000    # pause the bot computer after 10 minutes idle
+SANDBOX_IDLE_MS=600000    # pause or stop after 10 minutes idle; 0 disables idle sleep
+# Set 0 when self-hosting with Docker, where an idle computer costs nothing, to keep long-running apps and sessions up.
+# E2B, CreateOS and Box still apply their own timeouts.
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
 MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
 E2B_API_KEY=              # when SANDBOX_PROVIDER=e2b

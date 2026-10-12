@@ -17,6 +17,7 @@ import {
   createRunExecutor,
   createRunSandbox,
   createRunSecretWriter,
+  createTicketChangeNotifier,
   createWebProvider,
   databaseCapacityBackoffMs,
   ExpoPushProvider,
@@ -49,6 +50,7 @@ import {
 } from "@rakazo/adapters";
 import { resolveEncryptionKey, resolveSupervisorToken } from "@rakazo/core";
 import {
+  createBoardEvents,
   createDb,
   createThreadEvents,
   isTooManyDatabaseConnections,
@@ -86,13 +88,16 @@ async function main() {
   const events = createThreadEvents(prisma, realtime, {
     runSecretWriter: createRunSecretWriter(secrets),
   });
+  const ticketBoardEnabled = process.env.TICKET_BOARD_ENABLED === "true";
+  const boardEvents = createBoardEvents(realtime);
   const dataDir = process.env.DATA_DIR ?? "./data";
   const runtime =
     process.env.AGENT_RUNTIME === "scripted"
       ? new ScriptedAgentRuntime()
       : new PiAgentRuntime({ sessionRoot: resolvePiSessionRoot(dataDir) });
   // Same resolver the API uses, so both processes agree on provider, model and key.
-  const { key: deploymentModelKey } = resolveDeploymentModel();
+  const { key: deploymentModelKey, configured: deploymentModelConfigured } =
+    resolveDeploymentModel();
   const sandboxProvider = resolveSandboxProvider(process.env);
   const sandbox = createRunSandbox(sandboxProvider, {
     ...sandboxProviderOptionsFromEnv(process.env),
@@ -133,7 +138,7 @@ async function main() {
   // API process, which is the one with the inbound sink actually wired up.
   const messagingPlatforms = messagingPlatformsFromEnv(messagingEnvFromProcess(process.env));
   const messaging = isMessagingSurfaceEnabled(messagingPlatforms, {
-    deploymentModelKey,
+    deploymentModelConfigured,
     openSignup: process.env.MESSAGING_OPEN_SIGNUP === "true",
   })
     ? new ChatSdkMessagingSurface(messagingPlatforms)
@@ -162,6 +167,12 @@ async function main() {
   const artifacts = new LocalArtifactStore(dataDir);
   const inMemoryJobs = process.env.WAKEUP_DRIVER === "memory" ? new InMemoryJobQueue() : undefined;
   const jobs: JobPublisher = inMemoryJobs ?? new GraphileJobPublisher(pool);
+  const ticketChanges = createTicketChangeNotifier({
+    boardEvents,
+    jobs,
+    prisma,
+    ticketBoardEnabled,
+  });
   const jobHost: JobWorkerHost =
     inMemoryJobs ??
     new GraphileJobWorkerHost(pool, {
@@ -205,10 +216,13 @@ async function main() {
     secretStore: secrets,
     mcpAllowPrivateEndpoint: process.env.MCP_ALLOW_PRIVATE_ENDPOINT === "true",
     deploymentModelKey,
+    deploymentModelConfigured,
     dataDir,
     notifications,
     jobs,
     events,
+    onTicketChange: ticketChanges,
+    ticketBoardEnabled,
     messaging: messaging ? createMessagingContextLoader(prisma) : undefined,
     web: createWebProvider(),
     cloudAgent,
@@ -226,6 +240,7 @@ async function main() {
     secretStore: secrets,
     memoryProviders,
     deploymentModelKey,
+    deploymentModelConfigured,
     messaging,
     cloudAgent,
   });
