@@ -50,8 +50,8 @@ const duplicate = Object.assign(new Error("Unique constraint failed"), { code: "
 
 describe("parseGroupSpaces", () => {
   it("reads group:spaceId pairs", () => {
-    expect(parseGroupSpaces(" orca:space-1, ops team:space-2 ")).toEqual([
-      { group: "orca", spaceId: "space-1" },
+    expect(parseGroupSpaces(" engineering:space-1, ops team:space-2 ")).toEqual([
+      { group: "engineering", spaceId: "space-1" },
       { group: "ops team", spaceId: "space-2" },
     ]);
   });
@@ -62,18 +62,18 @@ describe("parseGroupSpaces", () => {
   });
 
   it("refuses an entry without a group or Space", () => {
-    expect(() => parseGroupSpaces("orca")).toThrow("must be group:spaceId");
-    expect(() => parseGroupSpaces("orca:")).toThrow("must be group:spaceId");
+    expect(() => parseGroupSpaces("engineering")).toThrow("must be group:spaceId");
+    expect(() => parseGroupSpaces("engineering:")).toThrow("must be group:spaceId");
     expect(() => parseGroupSpaces(":space-1")).toThrow("must be group:spaceId");
   });
 });
 
 describe("syncGroupSpaces", () => {
-  const mapping = [{ group: "orca", spaceId: "space-1" }];
+  const mapping = [{ group: "engineering", spaceId: "space-1" }];
 
   it("adds a group member to the Space as a member", async () => {
     const prisma = makePrisma({ spaces: [{ id: "space-1", organizationId: "org-1" }] });
-    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["orca"], mapping);
+    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["engineering"], mapping);
 
     expect(prisma.member.create.mock.calls[0]?.[0].data).toMatchObject({
       organizationId: "org-1",
@@ -92,7 +92,7 @@ describe("syncGroupSpaces", () => {
 
   it("drops the default Space the member trigger added unless the group grants it", async () => {
     const prisma = makePrisma({ spaces: [{ id: "space-1", organizationId: "org-1" }] });
-    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["orca"], mapping);
+    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["engineering"], mapping);
 
     const memberId = prisma.member.create.mock.calls[0]?.[0].data.id;
     expect(prisma.spaceMember.deleteMany).toHaveBeenCalledWith({
@@ -107,7 +107,7 @@ describe("syncGroupSpaces", () => {
     prisma.notificationPreference.create.mockRejectedValue(duplicate);
 
     await expect(
-      syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["orca"], mapping),
+      syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["engineering"], mapping),
     ).resolves.toEqual({ missingSpaceIds: [] });
     expect(prisma.spaceMember.deleteMany).not.toHaveBeenCalled();
   });
@@ -174,7 +174,7 @@ describe("syncGroupSpaces", () => {
       "user-2",
       ["ops"],
       [
-        { group: "orca", spaceId: "space-1" },
+        { group: "engineering", spaceId: "space-1" },
         { group: "ops", spaceId: "space-1" },
       ],
     );
@@ -186,7 +186,7 @@ describe("syncGroupSpaces", () => {
   it("reports mapped Spaces that do not exist", async () => {
     const prisma = makePrisma({ spaces: [] });
     await expect(
-      syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["orca"], mapping),
+      syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["engineering"], mapping),
     ).resolves.toEqual({ missingSpaceIds: ["space-1"] });
     expect(prisma.member.create).not.toHaveBeenCalled();
   });

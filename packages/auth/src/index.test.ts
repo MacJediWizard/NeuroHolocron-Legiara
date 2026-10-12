@@ -206,7 +206,7 @@ describe("fork: group Spaces from OIDC groups", () => {
     name: "SSO",
     scopes: [],
     allowSignupBypass: true,
-    groupSpaces: [{ group: "orca", spaceId: "space-1" }],
+    groupSpaces: [{ group: "engineering", spaceId: "space-1" }],
     onGroupSpaceMissing: vi.fn(),
   };
   const oidcCallback = { path: "/callback/:id", params: { id: "oidc" } };
@@ -249,12 +249,12 @@ describe("fork: group Spaces from OIDC groups", () => {
 
   it("syncs Space membership from the ID token groups at sign-in", async () => {
     syncGroupSpaces.mockResolvedValueOnce({ missingSpaceIds: ["space-1"] });
-    await signIn(idToken({ sub: "user", groups: ["orca", "staff"] }));
+    await signIn(idToken({ sub: "user", groups: ["engineering", "staff"] }));
 
     expect(syncGroupSpaces).toHaveBeenCalledWith(
       expect.anything(),
       "user",
-      ["orca", "staff"],
+      ["engineering", "staff"],
       oidc.groupSpaces,
     );
     expect(oidc.onGroupSpaceMissing).toHaveBeenCalledWith(["space-1"]);
@@ -268,7 +268,7 @@ describe("fork: group Spaces from OIDC groups", () => {
   });
 
   it("syncs only on the OIDC callback, not on other sign-ins", async () => {
-    const token = idToken({ sub: "user", groups: ["orca"] });
+    const token = idToken({ sub: "user", groups: ["engineering"] });
     await signIn(token, { path: "/sign-in/email" });
     await signIn(token, { path: "/callback/:id", params: { id: "github" } });
 
@@ -276,8 +276,8 @@ describe("fork: group Spaces from OIDC groups", () => {
   });
 
   it("reads groups from the configured claim", () => {
-    expect(idTokenGroups(idToken({ roles: ["orca", 7] }), "roles")).toEqual(["orca"]);
-    expect(idTokenGroups(idToken({ roles: "orca" }), "roles")).toBeUndefined();
+    expect(idTokenGroups(idToken({ roles: ["engineering", 7] }), "roles")).toEqual(["engineering"]);
+    expect(idTokenGroups(idToken({ roles: "engineering" }), "roles")).toBeUndefined();
     expect(idTokenGroups("not-a-jwt", "groups")).toBeUndefined();
     expect(idTokenGroups("a.%%%.c", "groups")).toBeUndefined();
   });

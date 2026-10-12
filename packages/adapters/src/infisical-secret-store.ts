@@ -15,7 +15,7 @@ export { SecretNotFoundError, SecretStoreUnavailableError } from "@rakazo/adapte
 
 export const INFISICAL_REF_PREFIX = "infisical:v1:";
 
-// Fork shim: Legiara (and spartacus-services, which shares the /app folder) store refs as
+// Fork shim: Legiara (and any other app sharing its Infisical folder) stores refs as
 // `infisical:SECRET_<recordId with non-alphanumerics as _>[__v<base36>_<hex>]`. Any
 // `infisical:` ref belongs to this store; `key()` decides which format it is.
 const FORK_REF_PREFIX = "infisical:";
@@ -30,7 +30,7 @@ function forkKeyBase(recordId: string): string {
   return `SECRET_${recordId.replace(/[^A-Za-z0-9]/g, "_")}`;
 }
 
-/** Fork key format, read and written by spartacus-services too. */
+/** Fork key format, also read and written by other apps sharing the folder. */
 function forkKeyBelongsTo(key: string, recordId: string): boolean {
   const base = forkKeyBase(recordId);
   return key === base || (key.startsWith(base) && FORK_VERSION_SUFFIX.test(key.slice(base.length)));
@@ -113,7 +113,7 @@ export class InfisicalSecretStore extends SecretChanges implements SecretStore {
     this.changed(ref);
   }
   /**
-   * Fork shim: an external writer (spartacus-services) changed some key. Drop cached values so
+   * Fork shim: an external writer changed some key. Drop cached values so
    * the next read refetches; `observe` still reports a real rotation through `changed`.
    */
   dropCache(): void {
@@ -187,7 +187,7 @@ export class InfisicalSecretStore extends SecretChanges implements SecretStore {
     context.signal.throwIfAborted();
     if (options.ephemeral) throw new Error("Ephemeral secrets require local encrypted storage");
     const recordId = options.recordId ?? randomUUID();
-    // Fork shim: write the fork key format so spartacus-services can read what Legiara writes.
+    // Fork shim: write the fork key format so other apps sharing the folder can read what Legiara writes.
     const key = `${forkKeyBase(recordId)}__v${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
     const ref = FORK_REF_PREFIX + key;
     try {

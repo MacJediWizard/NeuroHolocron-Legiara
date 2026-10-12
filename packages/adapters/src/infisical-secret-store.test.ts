@@ -1,4 +1,4 @@
-// Fork compat tests: Legiara and spartacus-services share Infisical keys in the fork format
+// Fork compat tests: Legiara shares Infisical keys with other apps on its folder in the fork format
 // `infisical:SECRET_<recordId with non-alphanumerics as _>[__v<base36>_<hex>]`.
 import type { AdapterContext, RealtimeFanout } from "@rakazo/adapter-kit";
 import { SecretNotFoundError } from "@rakazo/adapter-kit";

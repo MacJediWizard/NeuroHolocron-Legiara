@@ -646,7 +646,7 @@ it("counts only stored OIDC subjects bound to the current issuer", () => {
 });
 
 describe("fork: OIDC account-id migration", () => {
-  const groupSpaces = [{ group: "orca", spaceId: "space-1" }];
+  const groupSpaces = [{ group: "engineering", spaceId: "space-1" }];
   const accountStore = {
     account: {
       findMany: async ({ where }: { where: { providerId: string } }) =>
@@ -674,7 +674,7 @@ describe("fork: OIDC account-id migration", () => {
       sub: "subject-1",
       email: "sso@example.test",
       email_verified: true,
-      groups: ["orca"],
+      groups: ["engineering"],
     };
     expect((await signIn(claims)).headers.get("location")).toBe(`${origin}/app`);
     // The fork stored the raw ID token subject as the account id.
@@ -695,7 +695,7 @@ describe("fork: OIDC account-id migration", () => {
     expect(syncGroupSpaces).toHaveBeenCalledWith(
       expect.anything(),
       rows("user")[0]!.id,
-      ["orca"],
+      ["engineering"],
       groupSpaces,
     );
   });

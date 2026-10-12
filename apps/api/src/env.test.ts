@@ -263,10 +263,17 @@ describe("OIDC environment", () => {
       groupsClaim: "groups",
     });
     expect(
-      loadEnv({ ...base, ...oidc, OIDC_GROUP_SPACES: "orca:space-1", OIDC_GROUPS_CLAIM: "roles" })
-        .oidc,
-    ).toMatchObject({ groupSpaces: [{ group: "orca", spaceId: "space-1" }], groupsClaim: "roles" });
-    expect(() => loadEnv({ ...base, OIDC_GROUP_SPACES: "orca:space-1" })).toThrow(
+      loadEnv({
+        ...base,
+        ...oidc,
+        OIDC_GROUP_SPACES: "engineering:space-1",
+        OIDC_GROUPS_CLAIM: "roles",
+      }).oidc,
+    ).toMatchObject({
+      groupSpaces: [{ group: "engineering", spaceId: "space-1" }],
+      groupsClaim: "roles",
+    });
+    expect(() => loadEnv({ ...base, OIDC_GROUP_SPACES: "engineering:space-1" })).toThrow(
       "OIDC_GROUP_SPACES needs OIDC_ISSUER",
     );
   });

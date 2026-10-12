@@ -19,7 +19,7 @@ export function secretStoreOptionsFromEnv(
   // Fork alias: "database" was the fork's name for the encrypted store.
   if (provider === "encrypted" || provider === "database") return undefined;
   if (provider !== "infisical") throw new Error("Unsupported SECRET_STORE");
-  // Fork aliases: prod (and spartacus-services) use INFISICAL_SITE_URL / INFISICAL_SECRET_PATH.
+  // Fork aliases: some deployments use INFISICAL_SITE_URL / INFISICAL_SECRET_PATH.
   // Compose injects empty strings for unset vars, so an empty upstream name falls through too.
   const required = (name: string, alias?: string) => {
     const value = source[name]?.trim() || (alias ? source[alias]?.trim() : undefined);
@@ -70,7 +70,7 @@ function refreshTtl(source: NodeJS.ProcessEnv): { cacheTtlMs?: number } {
   return { cacheTtlMs: seconds * 1000 };
 }
 
-/** Fork: topic spartacus-services notifies (via pg_notify) after it writes a key. */
+/** Fork: topic an external writer notifies (via pg_notify) after it writes a key. */
 const LEGACY_CHANGED_TOPIC = "secret-store:changed";
 
 /** Routing is private to the store; consumers only see opaque refs. */
