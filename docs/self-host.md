@@ -348,7 +348,8 @@ Published images are minified. The image build uploads hidden source maps when i
 secrets `sentry_auth_token`, `sentry_url`, `sentry_org`, and `sentry_project` (the browser project),
 then deletes the maps. In GitHub Actions these come from the `SENTRY_AUTH_TOKEN`, `SENTRY_URL`,
 `SENTRY_ORG`, and `SENTRY_WEB_PROJECT` repository secrets. The token needs `project:releases` and
-`org:read`.
+`org:read`. BuildKit does not key its cache on secrets, so local builds that should upload pass a
+new `--build-arg SOURCEMAP_UPLOAD_ID=<any unique value>`.
 
 Compose passes these into the API, worker, supervisor, and updater. Computer containers and updater
 child commands do not receive them.

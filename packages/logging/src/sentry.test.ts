@@ -33,8 +33,12 @@ describe("sentry sink", () => {
     );
     expect(sentryConfigFromEnv({ SENTRY_DSN: "not a dsn" }).warning).toBeDefined();
     expect(
-      sentryConfigFromEnv({ SENTRY_DSN: DSN, SENTRY_ENVIRONMENT: " lg-acme ", GIT_SHA: "abc123" }),
-    ).toEqual({ config: { dsn: DSN, environment: "lg-acme", release: "abc123" } });
+      sentryConfigFromEnv({
+        SENTRY_DSN: DSN,
+        SENTRY_ENVIRONMENT: " prod-acme ",
+        GIT_SHA: "abc123",
+      }),
+    ).toEqual({ config: { dsn: DSN, environment: "prod-acme", release: "abc123" } });
     expect(
       sentryConfigFromEnv({ SENTRY_DSN: DSN, SENTRY_RELEASE: "v1", GIT_SHA: "abc" }).config
         ?.release,
@@ -47,7 +51,10 @@ describe("sentry sink", () => {
 
   it("reports error logs with the exception chain, tags, and redacted extras", async () => {
     const { events, transport } = recordingTransport();
-    const sink = createSentrySink({ dsn: DSN, environment: "lg-acme", release: "abc" }, transport);
+    const sink = createSentrySink(
+      { dsn: DSN, environment: "prod-acme", release: "abc" },
+      transport,
+    );
     const logger = createLogger({ service: "rakazo-worker", sinks: [sink] });
     const error = new Error("run failed", { cause: new TypeError("bad input") });
     logger.error("job crashed", error, { jobId: "j1", apiKey: "sk-secret" });
@@ -56,7 +63,7 @@ describe("sentry sink", () => {
     expect(events).toHaveLength(1);
     const event = events[0]!;
     expect(event).toMatchObject({
-      environment: "lg-acme",
+      environment: "prod-acme",
       release: "abc",
       level: "error",
       tags: { service: "rakazo-worker", jobId: "j1" },
@@ -66,6 +73,31 @@ describe("sentry sink", () => {
     const values = event.exception.values;
     expect(values.map((value: { type: string }) => value.type)).toEqual(["TypeError", "Error"]);
     expect(values[1].stacktrace.frames.at(-1).filename).toContain("sentry.test.ts");
+  });
+
+  it("redacts what it copies out when handed an event directly", async () => {
+    const { events, transport } = recordingTransport();
+    const sink = createSentrySink({ dsn: DSN }, transport);
+    sink.write({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      message: "login failed for ada@example.com",
+      "service.name": "rakazo-api",
+      "request.id": "Bearer abc.def",
+      password: "hunter2",
+      error: {
+        name: "Error",
+        message: "token=sk-live-123456789",
+        stack: "Error: token=sk-live-123456789",
+      },
+    });
+    await sink.flush?.();
+
+    const event = events[0]!;
+    expect(event.extra["log.message"]).toBe("login failed for [Redacted]");
+    expect(event.extra.password).toBe("[Redacted]");
+    expect(event.tags["request.id"]).toBe("Bearer [Redacted]");
+    expect(JSON.stringify(event)).not.toMatch(/hunter2|sk-live|ada@example/);
   });
 
   it("reports error logs without an error as messages and ignores lower levels", async () => {

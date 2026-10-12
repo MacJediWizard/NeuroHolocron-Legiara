@@ -8,7 +8,9 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @rakazo/db generate
 # Browser error reports are symbolicated by debug ID: hidden maps are uploaded when the build has
 # collector credentials, then removed so the image never serves them. Credentials and the collector
-# address arrive as build secrets, so neither lands in image history.
+# address arrive as build secrets, so neither lands in image history. BuildKit leaves secrets out of
+# the cache key, so a build that should upload passes a fresh SOURCEMAP_UPLOAD_ID to rerun this step.
+ARG SOURCEMAP_UPLOAD_ID
 RUN --mount=type=secret,id=sentry_auth_token,required=false \
     --mount=type=secret,id=sentry_url,required=false \
     --mount=type=secret,id=sentry_org,required=false \
