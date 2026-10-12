@@ -34,6 +34,7 @@ export interface AppEnv {
   dataDir: string;
   /** Opt-in Pi JSONL session recording under DATA_DIR/pi-sessions. Default off. */
   piSessionRecording: boolean;
+  ticketBoardEnabled: boolean;
   sandboxSupervisorUrl: string;
   sandboxSupervisorToken: string | undefined;
   screenProxySecret: string;
@@ -43,6 +44,10 @@ export interface AppEnv {
   cursorApiKey: string | undefined;
   agentRuntime: string;
   deploymentModelKey: string | undefined;
+  /** The deployment default model can run; see resolveDeploymentModel. */
+  deploymentModelConfigured: boolean;
+  /** The deployment default model runs on the host's credentials rather than a key. */
+  deploymentModelHostCredentials: boolean;
   e2bApiKey: string | undefined;
   daytonaApiKey: string | undefined;
   daytonaApiUrl: string | undefined;
@@ -147,9 +152,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
           scopes: (optional(source.OIDC_SCOPES) ?? "openid email profile")
             .split(/[\s,]+/)
             .filter(Boolean),
-          // Fork default: the operator's identity provider decides who gets in,
-          // so the bypass is on unless OIDC_ALLOW_SIGNUP_BYPASS=false.
-          allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS !== "false",
+          allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
           // Fork: Shared Spaces from provider groups.
           groupSpaces: parseGroupSpaces(source.OIDC_GROUP_SPACES),
           groupsClaim: optional(source.OIDC_GROUPS_CLAIM) ?? "groups",
@@ -179,6 +182,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     encryptionKey: resolveEncryptionKey(source),
     dataDir: source.DATA_DIR ?? "./data",
     piSessionRecording: source.PI_SESSION_RECORDING === "true",
+    ticketBoardEnabled: source.TICKET_BOARD_ENABLED === "true",
     sandboxSupervisorUrl: source.SANDBOX_SUPERVISOR_URL ?? "http://127.0.0.1:7091",
     sandboxSupervisorToken:
       sandboxProvider === "docker" ? resolveSupervisorToken(source) : undefined,
@@ -190,6 +194,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     agentRuntime: source.AGENT_RUNTIME ?? "pi",
     // Provider, model and key resolve together: see resolveDeploymentModel.
     deploymentModelKey: deploymentModel.key,
+    deploymentModelConfigured: deploymentModel.configured,
+    deploymentModelHostCredentials: deploymentModel.hostCredentials,
     e2bApiKey: source.E2B_API_KEY,
     daytonaApiKey: source.DAYTONA_API_KEY,
     daytonaApiUrl: source.DAYTONA_API_URL,

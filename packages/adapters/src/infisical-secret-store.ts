@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type {
   AdapterContext,
   SecretContext,
@@ -14,28 +14,6 @@ import { SecretChanges } from "./secret-changes.js";
 export { SecretNotFoundError, SecretStoreUnavailableError } from "@rakazo/adapter-kit";
 
 export const INFISICAL_REF_PREFIX = "infisical:v1:";
-
-// Fork shim: Legiara (and any other app sharing its Infisical folder) stores refs as
-// `infisical:SECRET_<recordId with non-alphanumerics as _>[__v<base36>_<hex>]`. Any
-// `infisical:` ref belongs to this store; `key()` decides which format it is.
-const FORK_REF_PREFIX = "infisical:";
-const FORK_VERSION_SUFFIX = /^__v[0-9a-z]+_[0-9a-f]+$/;
-
-/** True for every Infisical ref: upstream `infisical:v1:` and the fork's `infisical:SECRET_…`. */
-export function isInfisicalRef(ref: string): boolean {
-  return ref.startsWith(FORK_REF_PREFIX);
-}
-
-function forkKeyBase(recordId: string): string {
-  return `SECRET_${recordId.replace(/[^A-Za-z0-9]/g, "_")}`;
-}
-
-/** Fork key format, also read and written by other apps sharing the folder. */
-function forkKeyBelongsTo(key: string, recordId: string): boolean {
-  const base = forkKeyBase(recordId);
-  return key === base || (key.startsWith(base) && FORK_VERSION_SUFFIX.test(key.slice(base.length)));
-}
-
 export interface InfisicalSecretStoreOptions {
   baseUrl: string;
   clientId: string;
@@ -112,14 +90,6 @@ export class InfisicalSecretStore extends SecretChanges implements SecretStore {
     this.lastSeen.delete(ref);
     this.changed(ref);
   }
-  /**
-   * Fork shim: an external writer changed some key. Drop cached values so
-   * the next read refetches; `observe` still reports a real rotation through `changed`.
-   */
-  dropCache(): void {
-    for (const reads of this.reads.values()) for (const read of reads) read.invalidated = true;
-    for (const ref of [...this.cache.keys()]) this.dropCached(ref);
-  }
   private dropCached(ref: string): void {
     const entry = this.cache.get(ref);
     if (entry) clearTimeout(entry.timer);
@@ -156,11 +126,6 @@ export class InfisicalSecretStore extends SecretChanges implements SecretStore {
   }
   private key(ref: string, context: SecretContext): string {
     const recordId = typeof context === "string" ? context : context.recordId;
-    if (!ref.startsWith(INFISICAL_REF_PREFIX) && isInfisicalRef(ref)) {
-      const forkKey = ref.slice(FORK_REF_PREFIX.length);
-      if (!forkKeyBelongsTo(forkKey, recordId)) throw new SecretNotFoundError();
-      return forkKey;
-    }
     const prefix = `rakazo_${credentialDigest(recordId).slice(0, 24)}_`;
     const key = ref.slice(INFISICAL_REF_PREFIX.length);
     if (
@@ -187,14 +152,13 @@ export class InfisicalSecretStore extends SecretChanges implements SecretStore {
     context.signal.throwIfAborted();
     if (options.ephemeral) throw new Error("Ephemeral secrets require local encrypted storage");
     const recordId = options.recordId ?? randomUUID();
-    // Fork shim: write the fork key format so other apps sharing the folder can read what Legiara writes.
-    const key = `${forkKeyBase(recordId)}__v${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
-    const ref = FORK_REF_PREFIX + key;
+    const key = `rakazo_${credentialDigest(recordId).slice(0, 24)}_${randomUUID()}`;
+    const ref = INFISICAL_REF_PREFIX + key;
     try {
       await this.request(
         `/api/v3/secrets/raw/${key}`,
         "POST",
-        { ...this.scope(), secretValue: plaintext, secretComment: context.operationId },
+        { ...this.scope(), secretValue: plaintext },
         context.signal,
       );
     } catch (error) {

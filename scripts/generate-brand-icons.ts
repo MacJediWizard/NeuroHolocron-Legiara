@@ -78,15 +78,6 @@ async function ico(sizes: number[]) {
   return Buffer.concat([header, ...frames]);
 }
 
-async function svgFavicon() {
-  const png = (await full(128)).toString("base64");
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 128 128" role="img" aria-labelledby="title">
-  <title id="title">${PRODUCT_NAME} mark</title>
-  <image width="128" height="128" href="data:image/png;base64,${png}" />
-</svg>
-`;
-}
-
 // 1200x630 link preview: mark on the left, name and tagline on the right.
 async function socialCard() {
   const text = Buffer.from(`<svg width="1200" height="630" xmlns="http://www.w3.org/2000/svg">
@@ -122,17 +113,17 @@ const outputs: Record<string, () => Promise<Buffer | string>> = {
   "apps/web/public/favicon-16x16.png": () => full(16),
   "apps/web/public/favicon-32x32.png": () => full(32),
   "apps/web/public/favicon.ico": () => ico([16, 32, 48]),
-  "apps/web/public/favicon.svg": svgFavicon,
+  "apps/web/public/favicon.png": () => full(128),
   "apps/web/public/icon-192.png": () => full(192),
   "apps/web/public/icon-512.png": () => full(512),
   "apps/www/public/apple-touch-icon.png": () => full(180),
   "apps/www/public/favicon-16x16.png": () => full(16),
   "apps/www/public/favicon-32x32.png": () => full(32),
   "apps/www/public/favicon.ico": () => ico([16, 32, 48]),
-  "apps/www/public/favicon.svg": svgFavicon,
+  "apps/www/public/favicon.png": () => full(128),
   "apps/www/public/icon-192.png": () => full(192),
   "apps/www/public/icon-512.png": () => full(512),
-  "apps/www/public/brand/mark.png": async () => rounded(144, 32),
+  "apps/www/public/brand/rakazo-mark.png": async () => rounded(256, 57),
   "apps/www/public/og-image.png": socialCard,
 };
 

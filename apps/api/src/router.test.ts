@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createRouterClient } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import type { ManagedConnectorProvider } from "@rakazo/adapter-kit";
@@ -5,9 +8,11 @@ import { SecretStoreUnavailableError } from "@rakazo/adapter-kit";
 import {
   COMPUTER_SCREEN_UNAVAILABLE,
   CodexCatalogCache,
+  ComputerBusyError,
   ComputerScreenUnavailableError,
   EncryptedSecretStore,
   IntegrationProviderSettings,
+  LocalAgentHomeStore,
   screenLeaseIdForRun,
 } from "@rakazo/adapters";
 import type { Actor, Bot, ProductEvent } from "@rakazo/contracts";
@@ -221,7 +226,8 @@ describe("billing", () => {
 describe("model setup gate", () => {
   function modelGateDeps(options: {
     agentRuntime: string;
-    deploymentModelKey?: string;
+    deploymentModelConfigured?: boolean;
+    deploymentModelHostCredentials?: boolean;
     deploymentModelCredentialCipher?: string;
   }) {
     const prisma = {
@@ -250,7 +256,8 @@ describe("model setup gate", () => {
         agentRuntime: options.agentRuntime,
         defaultProvider: "openrouter",
         defaultModel: "test-model",
-        deploymentModelKey: options.deploymentModelKey,
+        deploymentModelConfigured: options.deploymentModelConfigured,
+        deploymentModelHostCredentials: options.deploymentModelHostCredentials,
         webOrigin: "http://127.0.0.1:5173",
         screenProxySecret: "fake-test-secret",
         sandboxProvider: "fake",
@@ -306,10 +313,10 @@ describe("model setup gate", () => {
     });
   });
 
-  it("accepts a deployment model key as model configuration", async () => {
+  it("accepts a configured deployment model as model configuration", async () => {
     const { actor, handler } = modelGateDeps({
       agentRuntime: "pi",
-      deploymentModelKey: "fake-deployment-key",
+      deploymentModelConfigured: true,
     });
 
     const response = await call(handler, actor, "me", null);
@@ -317,6 +324,28 @@ describe("model setup gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       json: expect.objectContaining({ needsModel: false }),
+    });
+  });
+
+  it("names the provider the deployment default runs on with host credentials", async () => {
+    const hostCredentials = modelGateDeps({
+      agentRuntime: "pi",
+      deploymentModelConfigured: true,
+      deploymentModelHostCredentials: true,
+    });
+    const keyed = modelGateDeps({ agentRuntime: "pi", deploymentModelConfigured: true });
+
+    const withHost = await call(hostCredentials.handler, hostCredentials.actor, "me", null);
+    const withKey = await call(keyed.handler, keyed.actor, "me", null);
+
+    await expect(withHost.json()).resolves.toEqual({
+      json: expect.objectContaining({
+        hostCredentialProvider: "openrouter",
+        hostCredentialSource: "host",
+      }),
+    });
+    await expect(withKey.json()).resolves.toEqual({
+      json: expect.objectContaining({ hostCredentialProvider: null, hostCredentialSource: null }),
     });
   });
 
@@ -421,6 +450,7 @@ describe("thread answer delivery", () => {
             runId: "run-1",
             messageId: "message-1",
             answer: "Paris",
+            clientNonce: "call:call-1:spoken-answer",
           },
         }),
       }),
@@ -435,6 +465,7 @@ describe("thread answer delivery", () => {
         spaceId: "workspace-1",
         threadId: "thread-1",
         runId: "run-1",
+        clientNonce: "call:call-1:spoken-answer",
       }),
     );
     expect(enqueue).toHaveBeenCalledOnce();
@@ -1514,6 +1545,10 @@ describe("computer terminal and file transfer", () => {
 
   function setup(computer: Record<string, unknown> = {}) {
     const sandbox = {
+      execute: vi.fn(async function* () {
+        yield { type: "exit" as const, code: 0 };
+      }),
+      listFiles: vi.fn().mockResolvedValue([]),
       connectTerminal: vi.fn().mockResolvedValue({
         url: "https://screen.example/vnc.html?path=websockify%3Ftoken%3Dterminal-1",
       }),
@@ -1572,6 +1607,73 @@ describe("computer terminal and file transfer", () => {
     };
     return { sandbox, prisma, call };
   }
+
+  it("prepares an unused bot's folders before listing a running Team Computer", async () => {
+    const { sandbox, call } = setup();
+    let prepared = false;
+    sandbox.execute.mockImplementation(async function* () {
+      prepared = true;
+      yield { type: "exit" as const, code: 0 };
+    });
+    sandbox.listFiles.mockImplementation(async () => {
+      if (!prepared) throw new Error("workspace folder does not exist");
+      return [];
+    });
+
+    await expect(call("files", { path: "" })).resolves.toEqual({
+      status: 200,
+      body: { json: [] },
+    });
+    expect(sandbox.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "sandbox-ref-1" }),
+      { argv: ["mkdir", "-p", "shared", "bots/bot-1"] },
+      expect.anything(),
+    );
+    expect(sandbox.listFiles).toHaveBeenCalledWith(
+      expect.anything(),
+      "bots/bot-1",
+      expect.anything(),
+    );
+  });
+
+  it("prepares the bot's folders when boot reuses an already running Team Computer", async () => {
+    const { sandbox, call } = setup();
+    await expect(call("boot", {})).resolves.toMatchObject({ status: 200 });
+    expect(sandbox.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "sandbox-ref-1" }),
+      { argv: ["mkdir", "-p", "shared", "bots/bot-1"] },
+      expect.anything(),
+    );
+  });
+
+  it("clears a reclaimed sandbox before boot attempts provisioning again", async () => {
+    const { sandbox, prisma, call } = setup();
+    sandbox.execute.mockImplementation(async function* () {
+      yield await Promise.reject(
+        Object.assign(new Error("Sandbox is probably not running anymore"), {
+          name: "SandboxNotFoundError",
+        }),
+      );
+    });
+    const findUniqueOrThrow = vi.fn().mockRejectedValue(new ComputerBusyError());
+    prisma.computer.findUniqueOrThrow = findUniqueOrThrow;
+
+    await expect(call("boot", {})).resolves.toMatchObject({ status: 409 });
+    expect(prisma.computer.updateMany).toHaveBeenCalledWith({
+      where: { id: "computer-1", providerRef: "sandbox-ref-1" },
+      data: { state: "stopped", providerRef: null },
+    });
+    expect(findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: "computer-1" } });
+  });
+
+  it("does not discard a live sandbox when folder preparation fails", async () => {
+    const { sandbox, prisma, call } = setup();
+    sandbox.execute.mockImplementation(async function* () {
+      yield { type: "exit" as const, code: 1 };
+    });
+    await expect(call("boot", {})).resolves.toMatchObject({ status: 500 });
+    expect(prisma.computer.updateMany).not.toHaveBeenCalled();
+  });
 
   it("opens a terminal only for the user holding this bot's control lease", async () => {
     const released = setup();
@@ -3106,7 +3208,7 @@ describe("bot model auth on save", () => {
       teamChatRules: "",
       webhookSecretId: null,
       spawnKey: null,
-      thread: { id: "thread-1", unread: false, messages: [] },
+      thread: { id: "thread-1", unread: false, messages: [], runs: [] },
       computer: null,
       runs: [],
     };
@@ -3389,25 +3491,51 @@ describe("routines.update", () => {
     webhookEnabled: false,
     githubEnabled: false,
     messageProvider: null,
+    modelProvider: null,
+    modelId: null,
+    thinkingLevel: null,
     lastRunAt: null,
     nextRunAt: null,
     createdAt: new Date("2026-09-01T00:00:00.000Z"),
   };
 
-  function fixture(botArchived: boolean, archivedBeforeWrite = false) {
-    const update = vi.fn(async (args: { data: Record<string, unknown> }) => {
-      if (archivedBeforeWrite) throw Object.assign(new Error("not found"), { code: "P2025" });
-      return {
-        ...routine,
-        ...Object.fromEntries(Object.entries(args.data).filter(([, value]) => value !== undefined)),
-      };
-    });
+  function fixture(
+    botArchived: boolean,
+    archivedBeforeWrite = false,
+    model: Record<string, unknown> = {},
+  ) {
+    const savedRoutine = { ...routine, ...model };
+    const update = vi.fn(
+      async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        if (archivedBeforeWrite) throw Object.assign(new Error("not found"), { code: "P2025" });
+        return {
+          ...savedRoutine,
+          ...Object.fromEntries(
+            Object.entries(args.data).filter(([, value]) => value !== undefined),
+          ),
+        };
+      },
+    );
     const enqueue = vi.fn(async () => undefined);
     const prisma = {
       spaceMember: ownerMembership(),
+      spaceModelPreference: {
+        findMany: vi.fn(async () => []),
+        findFirst: vi.fn(async () => ({ id: "preference-1" })),
+      },
+      userModelCredential: {
+        findMany: vi.fn(async () => [
+          {
+            id: "credential-1",
+            provider: "openai-compatible",
+            apiKey: "fake-key",
+            userId: actor.userId,
+          },
+        ]),
+      },
       routine: {
         findFirst: vi.fn(async (args: { where: { bot?: { archivedAt: null } } }) =>
-          botArchived && args.where.bot?.archivedAt === null ? null : routine,
+          botArchived && args.where.bot?.archivedAt === null ? null : savedRoutine,
         ),
         update,
       },
@@ -3425,7 +3553,7 @@ describe("routines.update", () => {
         jobs: { enqueue, cancel: vi.fn(async () => undefined) },
       } as unknown as RouterDeps),
     );
-    const call = () =>
+    const call = (patch: Record<string, unknown> = {}) =>
       handler.handle(
         new Request("http://127.0.0.1/rpc/routines/update", {
           method: "POST",
@@ -3435,12 +3563,13 @@ describe("routines.update", () => {
               routineId: "routine-1",
               active: true,
               runAt: new Date(Date.now() + 60_000).toISOString(),
+              ...patch,
             },
           }),
         }),
         { prefix: "/rpc", context: { actor } },
       );
-    return { update, enqueue, call };
+    return { update, enqueue, call, findFirst: prisma.routine.findFirst };
   }
 
   it("refuses to re-arm a routine on an archived bot without writing", async () => {
@@ -3470,16 +3599,95 @@ describe("routines.update", () => {
     expect(response.status).toBe(404);
     expect(enqueue).not.toHaveBeenCalled();
   });
+
+  const ownModel = {
+    modelProvider: "openai-compatible",
+    modelId: "old-model",
+    thinkingLevel: "high",
+  };
+
+  it("leaves model columns out of unrelated updates", async () => {
+    const { call, update } = fixture(false, false, ownModel);
+    expect((await call({ name: "Renamed" })).response.status).toBe(200);
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "routine-1", bot: { archivedAt: null } } }),
+    );
+    const data = update.mock.calls[0]![0].data;
+    for (const column of ["modelProvider", "modelId", "thinkingLevel"])
+      expect(data).not.toHaveProperty(column);
+  });
+
+  it.each(["modelProvider", "modelId", "thinkingLevel"])(
+    "rejects a partial model patch when %s changes before the write",
+    async (column) => {
+      const { call, update, enqueue } = fixture(false, false, ownModel);
+      update.mockImplementationOnce(async (args) => {
+        const current: Record<string, unknown> = { ...ownModel, [column]: "concurrent-choice" };
+        expect(args.where).toMatchObject(ownModel);
+        if (args.where[column] !== current[column]) {
+          throw Object.assign(new Error("not found"), { code: "P2025" });
+        }
+        throw new Error("Concurrent model change was not guarded");
+      });
+      expect((await call({ thinkingLevel: "low" })).response.status).toBe(409);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns not found if a model update races with a parent archive", async () => {
+    const { call, findFirst } = fixture(false, true, ownModel);
+    findFirst.mockResolvedValueOnce({ ...routine, ...ownModel }).mockResolvedValueOnce(null);
+    expect((await call({ thinkingLevel: "low" })).response.status).toBe(404);
+  });
+
+  it("merges a model-id-only patch with the saved provider and clears old thinking", async () => {
+    const { call, update } = fixture(false, false, ownModel);
+    expect((await call({ modelId: "new-model" })).response.status).toBe(200);
+    expect(update.mock.calls[0]![0].data).toMatchObject({
+      modelProvider: "openai-compatible",
+      modelId: "new-model",
+      thinkingLevel: null,
+    });
+  });
+
+  it("merges a provider-only patch with the saved model and clears old thinking", async () => {
+    const { call, update } = fixture(false, false, { ...ownModel, modelProvider: "openrouter" });
+    expect((await call({ modelProvider: "openai-compatible" })).response.status).toBe(200);
+    expect(update.mock.calls[0]![0].data).toMatchObject({
+      modelProvider: "openai-compatible",
+      modelId: "old-model",
+      thinkingLevel: null,
+    });
+  });
+
+  it("keeps an explicitly supplied thinking level when changing models", async () => {
+    const { call, update } = fixture(false, false, ownModel);
+    expect((await call({ modelId: "new-model", thinkingLevel: "low" })).response.status).toBe(200);
+    expect(update.mock.calls[0]![0].data).toMatchObject({ thinkingLevel: "low" });
+  });
+
+  it("rejects a partial patch whose resulting model is incomplete", async () => {
+    const { call, update } = fixture(false, false, ownModel);
+    expect((await call({ modelId: null })).response.status).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("rejects thinking without a resulting model", async () => {
+    const { call, update } = fixture(false);
+    expect((await call({ thinkingLevel: "high" })).response.status).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
 });
 
 describe("threads.endCall", () => {
-  function fixture(duplicateMarker?: boolean) {
+  function fixture(duplicateMarker?: boolean, userSpoke = true) {
     const created: { blocks?: unknown; clientNonce?: string }[] = [];
     const events: { type: string; payload: Record<string, unknown> }[] = [];
     const tx = {
       spaceMember: ownerMembership(),
       thread: { update: vi.fn().mockResolvedValue({ nextMessageSeq: 3, nextEventSeq: 5 }) },
       message: {
+        findFirst: vi.fn().mockResolvedValue(userSpoke ? { id: "utterance-1" } : null),
         create: vi.fn(async ({ data }: { data: { blocks: unknown; clientNonce?: string } }) => {
           if (duplicateMarker) throw Object.assign(new Error("unique"), { code: "P2002" });
           created.push({ blocks: data.blocks, clientNonce: data.clientNonce });
@@ -3566,6 +3774,26 @@ describe("threads.endCall", () => {
     );
     expect(String(tx.run.create.mock.calls[0]?.[0]?.data?.clientNonce)).toMatch(/^call:call-1:/);
     expect(enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("is a no-op for a late hang-up with no user call utterance", async () => {
+    const { call, created, events, tx, enqueue } = fixture(false, false);
+    const { response } = await call();
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ json: { ok: true } });
+    expect(tx.message.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          threadId: "thread-1",
+          role: "user",
+          clientNonce: { startsWith: "call:call-1:" },
+        }),
+      }),
+    );
+    expect(created).toEqual([]);
+    expect(events).toEqual([]);
+    expect(tx.run.create).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it("is a no-op when a concurrent hang-up already wrote the marker", async () => {
@@ -3773,5 +4001,280 @@ describe("shared Space model credentials", () => {
         include: { preferences: { where: { userId: "owner-1", spaceId: "workspace-1" } } },
       }),
     );
+  });
+});
+
+describe("boards.rename", () => {
+  const actor = {
+    spaceId: "workspace-1",
+    userId: "user-1",
+    email: "user@rakazo.test",
+    isDeploymentOwner: true,
+  } satisfies Actor;
+
+  function boardRow(ticketPrefix = "RAK") {
+    return {
+      id: "board-1",
+      spaceId: "workspace-1",
+      name: "Personal",
+      ticketPrefix,
+      nextNumber: 2,
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-06-01T00:00:00.000Z"),
+    };
+  }
+
+  function renameDeps(tickets: number, ticketPrefix = "RAK") {
+    const count = vi.fn(async () => tickets);
+    const update = vi.fn(async ({ data }: { data: { name?: string; ticketPrefix?: string } }) => ({
+      ...boardRow(ticketPrefix),
+      ...data,
+      updatedAt: new Date("2026-06-02T00:00:00.000Z"),
+    }));
+    const prisma = {
+      board: {
+        findUnique: vi.fn(async () => boardRow(ticketPrefix)),
+        update,
+      },
+      ticket: { count },
+    } as unknown as PrismaClient;
+    const deps = { prisma, env: { ticketBoardEnabled: true } } as unknown as RouterDeps;
+    return { count, update, handler: new RPCHandler(createRouter(deps)) };
+  }
+
+  async function rename(handler: RPCHandler<never>, body: unknown) {
+    const { response } = await handler.handle(
+      new Request("http://127.0.0.1/rpc/boards/rename", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ json: body }),
+      }),
+      { prefix: "/rpc", context: { actor } },
+    );
+    return response;
+  }
+
+  it("rejects a prefix change after tickets exist", async () => {
+    const { count, update, handler } = renameDeps(2);
+    const response = await rename(handler, { ticketPrefix: "OPS" });
+    expect(response?.status).toBe(400);
+    await expect(response?.json()).resolves.toEqual({
+      json: expect.objectContaining({
+        code: "BAD_REQUEST",
+        message: "Cannot change the ticket prefix once tickets exist.",
+      }),
+    });
+    expect(count).toHaveBeenCalledWith({
+      where: { boardId: "board-1", spaceId: "workspace-1" },
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("renames the board without changing the prefix", async () => {
+    const { count, update, handler } = renameDeps(2);
+    const response = await rename(handler, { name: "Launch" });
+    expect(response?.status).toBe(200);
+    await expect(response?.json()).resolves.toEqual({
+      json: expect.objectContaining({ name: "Launch", ticketPrefix: "RAK" }),
+    });
+    expect(count).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "board-1" },
+      data: { name: "Launch" },
+    });
+  });
+});
+
+describe("export.bot", () => {
+  const actor = {
+    spaceId: "workspace-1",
+    userId: "user-1",
+    email: "user@rakazo.test",
+    isDeploymentOwner: true,
+  } satisfies Actor;
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  async function homeWith(files: Record<string, string | Uint8Array>) {
+    const root = await mkdtemp(path.join(tmpdir(), "rakazo-export-"));
+    roots.push(root);
+    const home = new LocalAgentHomeStore(root);
+    for (const [file, content] of Object.entries(files)) {
+      const target = path.join(home.pathFor("home-1"), file);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, content);
+    }
+    return home;
+  }
+
+  async function exportFiles(scope: "team" | "dedicated", home: LocalAgentHomeStore) {
+    const prisma = {
+      bot: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: "bot-1",
+          name: "Writer",
+          title: "",
+          description: "",
+          instructions: "",
+          thread: { id: "thread-1" },
+          computer: { id: "computer-1", scope, homeKey: "home-1" },
+        }),
+      },
+      memoryDocument: { findMany: vi.fn().mockResolvedValue([]) },
+      routine: { findMany: vi.fn().mockResolvedValue([]) },
+      message: { findMany: vi.fn().mockResolvedValue([]) },
+    } as unknown as PrismaClient;
+    const deps = {
+      prisma,
+      home,
+      env: {
+        webOrigin: "http://127.0.0.1:5173",
+        screenProxySecret: "fake-test-secret",
+        sandboxProvider: "docker",
+      },
+      dataDir: "/tmp/rakazo-router-test",
+    } as unknown as RouterDeps;
+    const client = createRouterClient(createRouter(deps), { context: { actor } as never });
+    const manifest = await client.export.bot({ botId: "bot-1" });
+    return manifest.files.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  it("exports only the bot's own folder from a Team Computer", async () => {
+    const home = await homeWith({
+      "bots/bot-1/notes/result.txt": "mine",
+      "bots/bot-1/project/.gitignore": "dist",
+      "bots/bot-1/.cache/pip/wheel": "cache",
+      "bots/bot-10/notes.txt": "prefix-sharing bot",
+      "bots/bot-2/private.txt": "other bot",
+      "shared/handoff.txt": "shared",
+      ".cache/fontconfig/cache-1": Uint8Array.from([0, 159, 146, 150]),
+      ".browser-profiles/chromium-bot-1/Cookies": "session",
+    });
+    const own = path.join(home.pathFor("home-1"), "bots/bot-1");
+    await symlink("../bot-2", path.join(own, "peer-dir"));
+    await symlink("../bot-2/private.txt", path.join(own, "peer-file"));
+    await symlink("../../shared", path.join(own, "shared-link"));
+    await symlink(".cache/pip/wheel", path.join(own, "wheel.txt"));
+
+    expect(await exportFiles("team", home)).toEqual([
+      { path: "notes/result.txt", content: "mine" },
+      { path: "project/.gitignore", content: "dist" },
+    ]);
+  });
+
+  it("keeps the bot's files that another bot links to", async () => {
+    const home = await homeWith({
+      "bots/bot-1/attachments/photo.bin": Uint8Array.from([0, 255]),
+      "bots/bot-00/notes.txt": "other bot",
+    });
+    await symlink("../bot-1/attachments", path.join(home.pathFor("home-1"), "bots/bot-00/grab"));
+
+    expect((await exportFiles("team", home)).map((file) => file.path)).toEqual([
+      "attachments/photo.bin",
+    ]);
+  });
+
+  it("exports nothing when the bot's Team Computer folder is a link", async () => {
+    const home = await homeWith({ "bots/bot-2/private.txt": "other bot" });
+    await symlink("bot-2", path.join(home.pathFor("home-1"), "bots/bot-1"));
+
+    expect(await exportFiles("team", home)).toEqual([]);
+  });
+
+  it("skips machine state at the root of a Private Computer home", async () => {
+    const home = await homeWith({
+      "notes/result.txt": "mine",
+      "project/.gitignore": "dist",
+      ".cache/fontconfig/cache-1": Uint8Array.from([0, 159, 146, 150]),
+      ".config/mimeapps.list": "[Default Applications]",
+      ".browser-profiles/chromium/Cookies": "session",
+      ".bash_history": "history",
+    });
+    const root = home.pathFor("home-1");
+    await symlink(".bash_history", path.join(root, "history.txt"));
+    await symlink(".config/mimeapps.list", path.join(root, "notes/mimeapps.list"));
+    await symlink(".gitignore", path.join(root, "project/ignore.txt"));
+
+    expect((await exportFiles("dedicated", home)).map((file) => file.path)).toEqual([
+      "notes/result.txt",
+      "project/.gitignore",
+      "project/ignore.txt",
+    ]);
+  });
+
+  it("keeps binary and byte-order-marked files byte-exact", async () => {
+    const binary = Uint8Array.from([0, 255, 137, 80, 78, 71, 13, 10, 26, 10, 192, 128]);
+    const bom = Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("hello")]);
+    const home = await homeWith({ "image.png": binary, "bom.txt": bom, "plain.txt": "שלום ✎" });
+
+    const files = await exportFiles("dedicated", home);
+    expect(files).toEqual([
+      { path: "bom.txt", content: "\uFEFFhello" },
+      { path: "image.png", content: Buffer.from(binary).toString("base64"), encoding: "base64" },
+      { path: "plain.txt", content: "שלום ✎" },
+    ]);
+    expect(new TextEncoder().encode(files[0]!.content)).toEqual(bom);
+  });
+});
+
+describe("link favicons", () => {
+  function faviconClient(actor: Actor | null) {
+    const favicon = vi.fn().mockResolvedValue({ icon: "data:image/png;base64,AAAA" });
+    const deps = {
+      prisma: {} as PrismaClient,
+      favicons: { favicon },
+      env: { webOrigin: "http://127.0.0.1:5173", screenProxySecret: "fake-test-secret" },
+      dataDir: "/tmp/rakazo-router-test",
+    } as unknown as RouterDeps;
+    const client = createRouterClient(createRouter(deps), { context: { actor } });
+    return { client, favicon };
+  }
+
+  const reader = {
+    spaceId: "workspace-1",
+    userId: "user-1",
+    email: "user@rakazo.test",
+    isDeploymentOwner: false,
+  } satisfies Actor;
+
+  it("answers a signed-in reader with the resolved icon for an origin", async () => {
+    const { client, favicon } = faviconClient(reader);
+    await expect(client.links.favicon({ origin: "https://x.com" })).resolves.toEqual({
+      icon: "data:image/png;base64,AAAA",
+    });
+    expect(favicon).toHaveBeenCalledWith("https://x.com");
+  });
+
+  it("passes a busy answer through so the client can ask again", async () => {
+    const { client, favicon } = faviconClient(reader);
+    favicon.mockResolvedValue({ icon: null, retry: true });
+    await expect(client.links.favicon({ origin: "https://x.com" })).resolves.toEqual({
+      icon: null,
+      retry: true,
+    });
+  });
+
+  it("accepts the longest origin a host name allows and nothing longer", async () => {
+    const { client, favicon } = faviconClient(reader);
+    // 253 characters: three 63-character labels and one 61-character label.
+    const host = ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(61)].join(".");
+    expect(host).toHaveLength(253);
+    const longest = `https://${host}:65535`;
+    await expect(client.links.favicon({ origin: longest })).resolves.toBeDefined();
+    expect(favicon).toHaveBeenCalledWith(longest);
+    await expect(client.links.favicon({ origin: `${longest}0` })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+  });
+
+  it("refuses a request without a session before resolving anything", async () => {
+    const { client, favicon } = faviconClient(null);
+    await expect(client.links.favicon({ origin: "https://x.com" })).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    expect(favicon).not.toHaveBeenCalled();
   });
 });

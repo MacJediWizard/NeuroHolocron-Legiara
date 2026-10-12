@@ -7,12 +7,14 @@ import type {
   GroupMember,
   MessageBlock,
   MessageReaction,
+  ReplyPreview,
   RunStatus,
   ThreadSnapshot,
 } from "@rakazo/contracts";
 import { GROUP_MEMBER_MIN, MessageBlock as MessageBlockSchema } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
+  BACKGROUND_RUN_TRIGGERS,
   callIdFromClientNonce,
   isActive,
   isConversationalRun,
@@ -20,7 +22,7 @@ import {
   resolveGroupTargetBotIds,
   runFailureError,
 } from "@rakazo/core";
-import { deriveMessageQuote } from "@rakazo/core/message-quote";
+import { deriveMessageQuote, messageReplyPreview } from "@rakazo/core/message-quote";
 import type { Prisma, PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   answerWaitingRunWithTextInTransaction,
@@ -269,7 +271,7 @@ async function lockAndLoadGroupMembers(
       members: {
         where: { bot: { archivedAt: null } },
         include: { bot: { select: { id: true, name: true, color: true } } },
-        orderBy: { createdAt: "asc" },
+        orderBy: [{ createdAt: "asc" }, { botId: "asc" }],
       },
     },
   });
@@ -354,7 +356,8 @@ export async function threadSnapshot(
               orderBy: { seq: "desc" },
               select: { seq: true },
             }),
-            // Waiting asks win over a concurrent busy run (including peer bot_message).
+            // Waiting asks win over a concurrent busy run, including peer bot_message
+            // and ticket runs. Busy ticket work stays off the transcript below.
             tx.run.findFirst({
               where: {
                 botId: target.botId,
@@ -367,8 +370,8 @@ export async function threadSnapshot(
               where: {
                 botId: target.botId,
                 threadId: target.threadId,
-                // Hide peer bot_message busy/failed noise; waiting is handled above.
-                trigger: { not: "bot_message" },
+                // Hide peer bot_message and background ticket busy/failed noise; waiting is handled above.
+                trigger: { notIn: ["bot_message", ...BACKGROUND_RUN_TRIGGERS] },
                 status: { in: [...ACTIVE_RUN_STATUSES, "failed"] },
               },
               // The id tiebreak keeps ordering deterministic under equal
@@ -389,8 +392,8 @@ export async function threadSnapshot(
                   where: {
                     botId: target.botId,
                     threadId: target.threadId,
-                    // Peer bot_message failures must not bury a user-visible failure.
-                    trigger: { not: "bot_message" },
+                    // Peer bot_message and background failures must not bury a user-visible failure.
+                    trigger: { notIn: ["bot_message", ...BACKGROUND_RUN_TRIGGERS] },
                     status: { in: ["failed", "completed", "cancelled"] },
                   },
                   orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -446,9 +449,10 @@ export async function threadSnapshot(
           where: {
             threadId: target.threadId,
             status: { in: [...ACTIVE_RUN_STATUSES] },
-            // Include waiting peer runs so their ask cards stay answerable.
+            // Waiting peer and ticket asks stay answerable. Busy ticket runs stay off
+            // the transcript; only their waiting_input / waiting_takeover states surface.
             OR: [
-              { trigger: { not: "bot_message" } },
+              { trigger: { notIn: ["bot_message", ...BACKGROUND_RUN_TRIGGERS] } },
               { status: { in: ["waiting_input", "waiting_takeover"] } },
             ],
           },
@@ -459,7 +463,7 @@ export async function threadSnapshot(
         tx.run.findMany({
           where: {
             threadId: target.threadId,
-            trigger: { not: "bot_message" },
+            trigger: { notIn: ["bot_message", ...BACKGROUND_RUN_TRIGGERS] },
             status: { in: ["failed", "completed", "cancelled"] },
           },
           orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
@@ -631,31 +635,45 @@ export async function sendThreadMessage(
     deps.prisma.$transaction(async (tx) => {
       let replyToMessageId: string | undefined;
       let replyQuote: string | undefined;
+      let replyPreview: ReplyPreview | null | undefined;
       if (input.replyToMessageId) {
         const reply = await tx.message.findFirst({
           where: { id: input.replyToMessageId, threadId: target.threadId },
-          select: { id: true, blocks: true, role: true },
+          select: { id: true, blocks: true, role: true, botId: true },
         });
-        // A deleted or paged-out parent must not lose the send: drop to a
-        // plain reply, same as quote verification failing below.
-        if (reply) {
+        // A missing target must not lose the send or retain an unverified id.
+        // The empty server-owned quote preserves the unavailable state after reload.
+        if (!reply) {
+          replyQuote = "";
+          replyPreview = null;
+        } else {
           replyToMessageId = input.replyToMessageId;
+          const parsed = MessageBlockSchema.array().safeParse(reply.blocks);
+          replyPreview = null;
+          if (parsed.success) {
+            replyPreview = messageReplyPreview(
+              parsed.data,
+              reply.role as ReplyPreview["role"],
+              reply.botId ?? undefined,
+            );
+            // Attachment labels stay in the preview; only selected text is persisted as a quote.
+            if (!requestedReplyQuote && !replyPreview.attachment) {
+              replyQuote = replyPreview.text || undefined;
+            }
+          }
           // Persist only text derived from the authoritative parent. A
           // mismatch or a derivation failure still sends a plain reply so
           // quote verification cannot lose a message.
-          if (requestedReplyQuote) {
-            const parsedBlocks = MessageBlockSchema.array().safeParse(reply.blocks);
-            if (parsedBlocks.success) {
-              try {
-                replyQuote = deriveMessageQuote(
-                  parsedBlocks.data,
-                  requestedReplyQuote,
-                  reply.role === "user" ? "plain-text" : "markdown",
-                );
-              } catch (error) {
-                getLogger().error("thread send quote derivation", error);
-                replyQuote = undefined;
-              }
+          if (requestedReplyQuote && parsed.success) {
+            try {
+              replyQuote = deriveMessageQuote(
+                parsed.data,
+                requestedReplyQuote,
+                reply.role === "user" ? "plain-text" : "markdown",
+              );
+            } catch (error) {
+              getLogger().error("thread send quote derivation", error);
+              replyQuote = undefined;
             }
           }
         }
@@ -734,6 +752,7 @@ export async function sendThreadMessage(
               runIds: answered.map((run) => run.id),
               replyToMessageId,
               replyQuote,
+              replyPreview,
             },
           });
           return { message, runs: answered, eventSeq: event.seq };
@@ -772,6 +791,7 @@ export async function sendThreadMessage(
               callId,
               replyToMessageId,
               replyQuote,
+              replyPreview,
             },
           });
           return { message, runs: [active], eventSeq: event.seq };
@@ -820,6 +840,7 @@ export async function sendThreadMessage(
             runIds: [run.id],
             replyToMessageId,
             replyQuote,
+            replyPreview,
           },
         });
         return { message, runs: [run], eventSeq: event.seq };
@@ -983,6 +1004,7 @@ export async function sendThreadMessage(
           runIds: runs.map((run) => run.id),
           replyToMessageId,
           replyQuote,
+          replyPreview,
         },
       });
       return { message, runs, eventSeq: event.seq };

@@ -42,8 +42,19 @@ test("sidebar roster shows Working… while a run is active", async ({ page }, t
     await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeVisible({
       timeout: 30_000,
     });
-    await expect(row.getByText("Working…", { exact: true })).toBeVisible();
+    const statusLabel = row.getByText("Working…", { exact: true });
+    await expect(statusLabel).toBeVisible();
     await expect(row).not.toContainText("keep working until I stop you");
+    const workingColor = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--status-working)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    await expect(statusLabel).toHaveCSS("color", workingColor);
+    await expect(statusLabel).toHaveCSS("font-weight", "600");
     await captureSidebarRoster(page, testInfo, "sidebar-work-status-working");
   } finally {
     await rpc(page, "threads/stop", { botId }).catch(() => undefined);

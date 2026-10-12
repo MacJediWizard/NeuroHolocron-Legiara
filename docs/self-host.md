@@ -35,6 +35,12 @@ Signup and local Docker computers work without an E2B account. Optional remote p
 Compose stack requires `SANDBOX_SUPERVISOR_TOKEN` for every provider; leave it empty and `compose up` fails closed.
 
 Optional: set `OPENROUTER_API_KEY` or connect a model in the UI after signup.
+A provider that authenticates from the host needs no key: for Amazon Bedrock with an ECS task,
+IRSA or EC2 instance role, opt in with `PI_DEFAULT_CREDENTIALS=host` and set
+`PI_DEFAULT_PROVIDER=amazon-bedrock`, `PI_DEFAULT_MODEL` and `AWS_REGION`. With an instance
+role, also complete both steps in [Restricted computer egress](#restricted-computer-egress):
+`SANDBOX_COMPUTER_EGRESS=restricted` alone does not stop bot computers reading the role's
+credentials from the metadata endpoint.
 Auto Review uses that LLM checker by default. To use TypeSafe Jev instead, set
 `RAKAZO_AUTO_REVIEW_PROVIDER=jev` and `TYPESAFE_API_KEY`. Core still runs with neither.
 
@@ -194,7 +200,7 @@ OIDC_CLIENT_SECRET=replace-with-client-secret
 OIDC_NAME=SSO
 OIDC_SCOPES=openid email profile
 AUTH_PASSWORD_ENABLED=true
-OIDC_ALLOW_SIGNUP_BYPASS=true
+OIDC_ALLOW_SIGNUP_BYPASS=false
 ```
 
 The issuer must be HTTPS and exactly match the discovery document's issuer. Legiara loads
@@ -230,10 +236,9 @@ still apply. Restoring the old issuer makes its existing links usable again.
 
 SSO signup follows closed registration and the deployment allowlist before creating an account.
 Allowlisted provider emails must be verified; the password signup's first-account exemption
-never upgrades an OIDC email. `OIDC_ALLOW_SIGNUP_BYPASS=true` admits IdP identities
-without applying the allowlist or its email-verification admission requirement. In this fork it
-defaults to `true` when unset, because the IdP controls who may join; set it to `false` to apply
-the allowlist to SSO signups. It does **not** reopen closed registration,
+never upgrades an OIDC email. `OIDC_ALLOW_SIGNUP_BYPASS=true` explicitly admits IdP identities
+without applying the allowlist or its email-verification admission requirement. Enable it only
+when the IdP controls who may join this deployment. It does **not** reopen closed registration,
 and does not change email verification claims or linking rules. Existing admitted accounts can
 sign in while registration is closed.
 
@@ -252,9 +257,6 @@ deletion or create another account in that flow. A stale or borrowed session alo
 email configured, **Send deletion code** sends a single-use code to the account email, valid for ten
 minutes. Enter it in account settings to confirm deletion. Email-code requests are rate-limited;
 invalid, expired or wrong-account codes fail. No password needs to be created for deletion.
-
-Accounts that an earlier Legiara release linked by the raw provider subject are rewritten to the
-issuer-bound id when the API starts, so those users keep signing in to the same account.
 
 #### Shared Spaces from provider groups
 
@@ -346,7 +348,8 @@ Published images are minified. The image build uploads hidden source maps when i
 secrets `sentry_auth_token`, `sentry_url`, `sentry_org`, and `sentry_project` (the browser project),
 then deletes the maps. In GitHub Actions these come from the `SENTRY_AUTH_TOKEN`, `SENTRY_URL`,
 `SENTRY_ORG`, and `SENTRY_WEB_PROJECT` repository secrets. The token needs `project:releases` and
-`org:read`.
+`org:read`. BuildKit does not key its cache on secrets, so local builds that should upload pass a
+new `--build-arg SOURCEMAP_UPLOAD_ID=<any unique value>`.
 
 Compose passes these into the API, worker, supervisor, and updater. Computer containers and updater
 child commands do not receive them.
@@ -359,7 +362,9 @@ SIGNUP_ALLOWLIST=you@example.com,@company.com
 SANDBOX_PROVIDER=docker   # or none, e2b, daytona, createos, box. Keep fake only for pnpm test.
 AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
-SANDBOX_IDLE_MS=600000    # pause the bot computer after 10 minutes idle
+SANDBOX_IDLE_MS=600000    # pause or stop after 10 minutes idle; 0 disables idle sleep
+# Set 0 when self-hosting with Docker, where an idle computer costs nothing, to keep long-running apps and sessions up.
+# E2B, CreateOS and Box still apply their own timeouts.
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
 MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
 E2B_API_KEY=              # when SANDBOX_PROVIDER=e2b

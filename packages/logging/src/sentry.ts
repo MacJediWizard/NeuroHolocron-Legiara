@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/node";
-import { redactSensitiveText } from "./redaction.js";
+import { redactBindings, redactSensitiveText } from "./redaction.js";
 import type { LogEvent, LogSink, SerializedError } from "./types.js";
 
 // Error reporting to any Sentry-protocol collector (GlitchTip, Sentry, Bugsink). Only error-level
@@ -85,7 +85,10 @@ export function createSentrySink(
   return {
     write(event: LogEvent) {
       if (event.level !== "error") return;
-      const { timestamp: _t, level: _l, message, "service.name": service, error, ...extra } = event;
+      const { timestamp: _t, level: _l, "service.name": service, error, ...rest } = event;
+      // The logger already redacts, but a sink can be handed any LogEvent; redact what we copy out.
+      const { message: _m, ...extra } = redactBindings(rest);
+      const message = redactSensitiveText(event.message);
       Sentry.withScope((scope) => {
         scope.setTag("service", service);
         for (const key of TAG_KEYS) {
@@ -122,9 +125,12 @@ function releaseFromGitSha(sha: string | undefined): string | undefined {
 
 /** The logger hands sinks a serialized error; rebuild one Sentry can parse, cause chain included. */
 function rebuildError(serialized: SerializedError): Error {
-  const error = new Error(serialized.message);
-  error.name = serialized.name;
-  error.stack = serialized.stack ?? `${serialized.name}: ${serialized.message}`;
+  const message = redactSensitiveText(serialized.message);
+  const error = new Error(message);
+  error.name = redactSensitiveText(serialized.name);
+  error.stack = serialized.stack
+    ? redactSensitiveText(serialized.stack)
+    : `${error.name}: ${message}`;
   if (serialized.cause) error.cause = rebuildError(serialized.cause);
   return error;
 }

@@ -36,6 +36,7 @@
   --color-link: var(--link);
   --color-success: var(--success);
   --color-warning: var(--warning);
+  --color-status-working: var(--status-working);
   --color-overlay: var(--overlay);
   --color-scrollbar: var(--scrollbar);
   --color-scrollbar-hover: var(--scrollbar-hover);
@@ -76,6 +77,33 @@
 
 .rakazo-bot-avatar[data-working="true"] .rakazo-bot-avatar-ring {
   opacity: 1;
+}
+
+@keyframes rakazo-avatar-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.07);
+    filter: brightness(1.12);
+  }
+}
+
+.rakazo-bot-avatar-picture {
+  box-shadow: 0 2px 5px rgb(0 0 0 / 0.5);
+}
+
+.rakazo-bot-avatar-ring-working {
+  filter: drop-shadow(0 0 4px var(--status-working));
+}
+
+.rakazo-bot-avatar[data-working="true"] .rakazo-bot-avatar-picture {
+  animation: rakazo-avatar-breathe 1.6s ease-in-out infinite;
+  box-shadow:
+    0 0 0 2px var(--status-working),
+    0 0 10px color-mix(in srgb, var(--status-working) 60%, transparent);
 }
 
 .rakazo-bot-avatar-eyes {
@@ -516,7 +544,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .rakazo-bot-avatar-ring,
-  .rakazo-bot-avatar-eyes {
+  .rakazo-bot-avatar-eyes,
+  .rakazo-bot-avatar[data-working="true"] .rakazo-bot-avatar-picture {
     animation: none;
     transition: none;
   }

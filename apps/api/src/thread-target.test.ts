@@ -4,12 +4,12 @@ import { callClientNonce } from "@rakazo/core";
 import type * as MessageQuoteModule from "@rakazo/core/message-quote";
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
+import type { ThreadTarget } from "./thread-target.js";
 import {
   cancelSupersededQueuedRuns,
   reactToThreadMessage,
   sendThreadMessage,
   stopThreadRuns,
-  type ThreadTarget,
   threadHead,
   threadSnapshot,
 } from "./thread-target.js";
@@ -296,7 +296,7 @@ describe("threadSnapshot", () => {
         where: expect.objectContaining({
           botId: "bot-1",
           threadId: "thread-1",
-          trigger: { not: "bot_message" },
+          trigger: { notIn: ["bot_message", "tickets"] },
           status: {
             in: ["queued", "leased", "running", "waiting_input", "waiting_takeover", "failed"],
           },
@@ -380,6 +380,55 @@ describe("threadSnapshot", () => {
     );
   });
 
+  it.each(["waiting_input", "running"])(
+    "only exposes ticket runs waiting for input (%s)",
+    async (status) => {
+      const waitingTicket = {
+        id: "run-ticket-waiting",
+        botId: "bot-1",
+        threadId: "thread-1",
+        taskId: "task-ticket",
+        status,
+        trigger: "tickets",
+        modelProvider: null,
+        modelId: null,
+        error: null,
+        startedAt: new Date("2026-08-23T00:00:02.000Z"),
+        completedAt: null,
+        createdAt: new Date("2026-08-23T00:00:02.000Z"),
+      };
+      const snapshot = await threadSnapshot(
+        {
+          prisma: {
+            $transaction: vi.fn(async (callback: (client: unknown) => unknown) =>
+              callback({
+                $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
+                message: { findMany: vi.fn().mockResolvedValue([]) },
+                event: {
+                  findFirst: vi.fn().mockResolvedValue(null),
+                  findMany: vi.fn().mockResolvedValue([]),
+                },
+                run: { findFirst: botRunFindFirst([waitingTicket]) },
+              }),
+            ),
+          } as unknown as PrismaClient,
+        },
+        {
+          kind: "bot",
+          botId: "bot-1",
+          threadId: "thread-1",
+          bot: { computer: null },
+        } as ThreadTarget,
+      );
+
+      if (status === "waiting_input") {
+        expect(snapshot.run).toEqual(expect.objectContaining({ id: "run-ticket-waiting", status }));
+      } else {
+        expect(snapshot.run).toBeNull();
+      }
+    },
+  );
+
   it("drops a failed run once a newer run has finished", async () => {
     const failed = {
       id: "run-failed",
@@ -435,7 +484,7 @@ describe("threadSnapshot", () => {
     expect(findFirstRun).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          trigger: { not: "bot_message" },
+          trigger: { notIn: ["bot_message", "tickets"] },
           status: { in: ["failed", "completed", "cancelled"] },
         }),
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -504,7 +553,7 @@ describe("threadSnapshot", () => {
       expect.objectContaining({
         where: {
           threadId: "thread-1",
-          trigger: { not: "bot_message" },
+          trigger: { notIn: ["bot_message", "tickets"] },
           status: { in: ["failed", "completed", "cancelled"] },
         },
         orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
@@ -517,7 +566,7 @@ describe("threadSnapshot", () => {
           threadId: "thread-1",
           status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
           OR: [
-            { trigger: { not: "bot_message" } },
+            { trigger: { notIn: ["bot_message", "tickets"] } },
             { status: { in: ["waiting_input", "waiting_takeover"] } },
           ],
         },
@@ -574,7 +623,7 @@ describe("threadSnapshot", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [
-            { trigger: { not: "bot_message" } },
+            { trigger: { notIn: ["bot_message", "tickets"] } },
             { status: { in: ["waiting_input", "waiting_takeover"] } },
           ],
           status: { in: ["queued", "leased", "running", "waiting_input", "waiting_takeover"] },
@@ -584,7 +633,7 @@ describe("threadSnapshot", () => {
     expect(findManyRuns).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          trigger: { not: "bot_message" },
+          trigger: { notIn: ["bot_message", "tickets"] },
           status: { in: ["failed", "completed", "cancelled"] },
         }),
       }),
@@ -890,21 +939,32 @@ function isTerminalRunQuery(where: { status?: { in?: string[] } } | undefined) {
   return Array.isArray(statuses) && statuses.includes("failed") && statuses.includes("completed");
 }
 
+type TriggerFilter = { not?: string; notIn?: string[] };
+
+function matchesTriggerFilter(trigger: string | undefined, filter: TriggerFilter | undefined) {
+  if (!filter) return true;
+  if (filter.not !== undefined && trigger === filter.not) return false;
+  if (filter.notIn !== undefined && trigger !== undefined && filter.notIn.includes(trigger)) {
+    return false;
+  }
+  return true;
+}
+
 function matchesPeerActiveFilter(
   row: { trigger?: string; status?: string },
   where:
     | {
-        trigger?: { not?: string };
-        OR?: Array<{ trigger?: { not?: string }; status?: { in?: string[] } }>;
+        trigger?: TriggerFilter;
+        OR?: Array<{ trigger?: TriggerFilter; status?: { in?: string[] } }>;
       }
     | undefined,
 ) {
-  if (where?.trigger?.not === "bot_message") return row.trigger !== "bot_message";
+  if (where?.trigger) return matchesTriggerFilter(row.trigger, where.trigger);
   if (!where?.OR) return true;
   return where.OR.some((clause) => {
-    if (clause.trigger?.not === "bot_message") return row.trigger !== "bot_message";
+    if (!matchesTriggerFilter(row.trigger, clause.trigger)) return false;
     if (clause.status?.in) return clause.status.in.includes(row.status ?? "");
-    return false;
+    return true;
   });
 }
 
@@ -920,16 +980,14 @@ function botRunFindFirst(
     async (args: {
       where?: {
         status?: { in?: string[] };
-        trigger?: { not?: string };
+        trigger?: TriggerFilter;
       };
       select?: { id?: boolean };
     }) => {
       const statuses = args.where?.status?.in;
       const matched = rows
         .filter((row) => !statuses || statuses.includes(row.status))
-        .filter((row) =>
-          args.where?.trigger?.not === "bot_message" ? row.trigger !== "bot_message" : true,
-        )
+        .filter((row) => matchesTriggerFilter(row.trigger, args.where?.trigger))
         .sort((a, b) => {
           const byCreated = (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0);
           return byCreated !== 0 ? byCreated : b.id.localeCompare(a.id);
@@ -2256,7 +2314,7 @@ describe("sendThreadMessage", () => {
     expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
     expect(tx.message.findFirst).toHaveBeenCalledWith({
       where: { id: "parent", threadId: "thread-1" },
-      select: { id: true, blocks: true, role: true },
+      select: { id: true, blocks: true, role: true, botId: true },
     });
     expect(tx.message.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -2332,84 +2390,87 @@ describe("sendThreadMessage", () => {
     });
   });
 
-  it("drops a quote excerpt when the parent's persisted blocks are malformed", async () => {
-    let messageSeq = 0;
-    let eventSeq = 0;
-    const tx = {
-      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
-      thread: {
-        update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
-          data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
-        ),
-      },
-      message: {
-        findFirst: vi.fn().mockResolvedValue({
-          id: "parent",
-          role: "bot",
-          blocks: [null],
-        }),
-        update: vi.fn(),
-        create: vi.fn().mockResolvedValue({
-          id: "msg-1",
-          threadId: "thread-1",
-          seq: 1,
-          role: "user",
-          blocks: [{ kind: "text", text: "why this?" }],
-          botId: null,
+  it.each([undefined, "words the parent never said"])(
+    "sends an unavailable reply to malformed blocks (quote: %s)",
+    async (quote) => {
+      let messageSeq = 0;
+      let eventSeq = 0;
+      const tx = {
+        user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
+        thread: {
+          update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
+            data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
+          ),
+        },
+        message: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "parent",
+            role: "bot",
+            blocks: [null],
+          }),
+          update: vi.fn(),
+          create: vi.fn().mockResolvedValue({
+            id: "msg-1",
+            threadId: "thread-1",
+            seq: 1,
+            role: "user",
+            blocks: [{ kind: "text", text: "why this?" }],
+            botId: null,
+            replyToMessageId: "parent",
+            replyQuote: null,
+            runId: null,
+            createdAt: new Date(),
+          }),
+        },
+        run: {
+          findMany: vi.fn().mockResolvedValue([]),
+          findUnique: vi.fn().mockResolvedValue({ status: "queued", startedAt: null }),
+          create: vi.fn().mockResolvedValue({ id: "run-1", taskId: "task-1", status: "queued" }),
+        },
+        task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
+        event: {
+          create: vi.fn().mockResolvedValue({ id: "event-1", seq: 1, createdAt: new Date() }),
+        },
+        steeringMessage: { create: vi.fn() },
+      };
+      const prisma = {
+        message: { findUnique: vi.fn().mockResolvedValue(null) },
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
+      const actor = { spaceId: "workspace-1", userId: "user-1" } as Actor;
+      const target = { kind: "bot", botId: "bot-1", threadId: "thread-1" } as ThreadTarget;
+
+      const result = await sendThreadMessage(
+        {
+          prisma,
+          events: { notify: vi.fn().mockResolvedValue(undefined) } as never,
+          jobs: { enqueue: vi.fn().mockResolvedValue(undefined) } as never,
+        },
+        actor,
+        target,
+        {
+          text: "why this?",
           replyToMessageId: "parent",
-          replyQuote: null,
-          runId: null,
-          createdAt: new Date(),
+          replyQuote: quote,
+          clientNonce: "nonce-1",
+        },
+      );
+
+      // The send still lands as a plain reply — the fabricated excerpt is dropped.
+      expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
+      expect(tx.message.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          replyToMessageId: "parent",
+          replyQuote: undefined,
         }),
-      },
-      run: {
-        findMany: vi.fn().mockResolvedValue([]),
-        findUnique: vi.fn().mockResolvedValue({ status: "queued", startedAt: null }),
-        create: vi.fn().mockResolvedValue({ id: "run-1", taskId: "task-1", status: "queued" }),
-      },
-      task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
-      event: {
-        create: vi.fn().mockResolvedValue({ id: "event-1", seq: 1, createdAt: new Date() }),
-      },
-      steeringMessage: { create: vi.fn() },
-    };
-    const prisma = {
-      message: { findUnique: vi.fn().mockResolvedValue(null) },
-      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
-    } as unknown as PrismaClient;
-    const actor = { spaceId: "workspace-1", userId: "user-1" } as Actor;
-    const target = { kind: "bot", botId: "bot-1", threadId: "thread-1" } as ThreadTarget;
-
-    const result = await sendThreadMessage(
-      {
-        prisma,
-        events: { notify: vi.fn().mockResolvedValue(undefined) } as never,
-        jobs: { enqueue: vi.fn().mockResolvedValue(undefined) } as never,
-      },
-      actor,
-      target,
-      {
-        text: "why this?",
-        replyToMessageId: "parent",
-        replyQuote: "words the parent never said",
-        clientNonce: "nonce-1",
-      },
-    );
-
-    // The send still lands as a plain reply — the fabricated excerpt is dropped.
-    expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
-    expect(tx.message.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        replyToMessageId: "parent",
-        replyQuote: undefined,
-      }),
-    });
-    expect(tx.event.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        payload: expect.not.objectContaining({ replyQuote: expect.anything() }),
-      }),
-    });
-  });
+      });
+      expect(tx.event.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({ replyPreview: null, replyToMessageId: "parent" }),
+        }),
+      });
+    },
+  );
 
   it("sends a plain reply when the reply target no longer exists", async () => {
     let messageSeq = 0;
@@ -2472,12 +2533,12 @@ describe("sendThreadMessage", () => {
       },
     );
 
-    // The send lands as a plain reply — no dangling target or quote is kept.
+    // The send lands with an unavailable marker and no dangling target.
     expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
     expect(tx.message.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         replyToMessageId: undefined,
-        replyQuote: undefined,
+        replyQuote: "",
       }),
     });
     expect(tx.event.create).toHaveBeenCalledWith({
@@ -2659,6 +2720,122 @@ describe("sendThreadMessage", () => {
         },
       );
 
+      expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
+      expect(tx.message.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ replyQuote: expectedQuote }),
+      });
+      expect(tx.event.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({ replyQuote: expectedQuote }),
+        }),
+      });
+    },
+  );
+
+  it.each([
+    [
+      "image only",
+      [{ kind: "image", artifactId: "photo", name: "", mimeType: "image/png" }],
+      undefined,
+      undefined,
+      "",
+      { kind: "image", artifactId: "photo", name: "", mimeType: "image/png" },
+    ],
+    [
+      "file only",
+      [{ kind: "file", artifactId: "file", name: "notes.txt", mimeType: "text/plain", size: 12 }],
+      undefined,
+      undefined,
+      "notes.txt",
+      { kind: "file", artifactId: "file", name: "notes.txt", mimeType: "text/plain" },
+    ],
+    [
+      "caption and selection",
+      [
+        { kind: "image", artifactId: "photo", name: "photo.png", mimeType: "image/png" },
+        { kind: "text", text: "Caption selected text" },
+      ],
+      "selected text",
+      "selected text",
+      "Caption selected text",
+      { kind: "image", artifactId: "photo", name: "photo.png", mimeType: "image/png" },
+    ],
+  ])(
+    "derives live reply metadata for %s from the same-thread parent",
+    async (_name, parentBlocks, requestedQuote, expectedQuote, expectedText, expectedAttachment) => {
+      let messageSeq = 0;
+      let eventSeq = 0;
+      const tx = {
+        user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
+        thread: {
+          update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
+            data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
+          ),
+        },
+        message: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "parent",
+            role: "bot",
+            blocks: parentBlocks,
+          }),
+          update: vi.fn(),
+          create: vi.fn().mockResolvedValue({
+            id: "msg-1",
+            threadId: "thread-1",
+            seq: 1,
+            role: "user",
+            blocks: [{ kind: "text", text: "why this?" }],
+            botId: null,
+            replyToMessageId: "parent",
+            replyQuote: expectedQuote,
+            runId: null,
+            createdAt: new Date(),
+          }),
+        },
+        run: {
+          findMany: vi.fn().mockResolvedValue([]),
+          findUnique: vi.fn().mockResolvedValue({ status: "queued", startedAt: null }),
+          create: vi.fn().mockResolvedValue({ id: "run-1", taskId: "task-1", status: "queued" }),
+        },
+        task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
+        event: {
+          create: vi.fn().mockResolvedValue({ id: "event-1", seq: 1, createdAt: new Date() }),
+        },
+        steeringMessage: { create: vi.fn() },
+      };
+      const prisma = {
+        message: { findUnique: vi.fn().mockResolvedValue(null) },
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
+      const actor = { spaceId: "workspace-1", userId: "user-1" } as Actor;
+      const target = { kind: "bot", botId: "bot-1", threadId: "thread-1" } as ThreadTarget;
+
+      const result = await sendThreadMessage(
+        {
+          prisma,
+          events: { notify: vi.fn().mockResolvedValue(undefined) } as never,
+          jobs: { enqueue: vi.fn().mockResolvedValue(undefined) } as never,
+        },
+        actor,
+        target,
+        {
+          text: "why this?",
+          replyToMessageId: "parent",
+          replyQuote: requestedQuote,
+          clientNonce: "nonce-1",
+        },
+      );
+
+      expect(tx.message.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "parent", threadId: "thread-1" } }),
+      );
+      expect(tx.event.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({
+            replyPreview: { role: "bot", text: expectedText, attachment: expectedAttachment },
+          }),
+        }),
+      });
       expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
       expect(tx.message.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ replyQuote: expectedQuote }),

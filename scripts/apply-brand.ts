@@ -37,7 +37,6 @@ const FILES = [
   "apps/mobile/.maestro/screenshots.yaml",
   "apps/mobile/.maestro/smoke.yaml",
   "apps/web/index.html",
-  "apps/web/public/favicon.svg",
   "apps/web/public/site.webmanifest",
   "docs/self-host.md",
   "infra/compose/.env.images.example",

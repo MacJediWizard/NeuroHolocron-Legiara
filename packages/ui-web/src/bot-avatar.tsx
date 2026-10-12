@@ -126,22 +126,16 @@ export const BotAvatar = memo(function BotAvatar({
   if (parsed.isImage && parsed.imageUrl) {
     return (
       <div
-        className={cn(
-          "rakazo-bot-avatar relative overflow-hidden rounded-full flex items-center justify-center select-none bg-secondary shrink-0 border border-border",
-          className,
-        )}
+        className={cn("rakazo-bot-avatar relative shrink-0 select-none", className)}
         data-working={isWorking}
-        style={{
-          width: size,
-          height: size,
-          boxShadow: isWorking
-            ? "0 0 0 2px #3B82F6, 0 0 10px rgba(59,130,246,0.6)"
-            : "0 2px 5px rgba(0,0,0,0.5)",
-        }}
+        style={{ width: size, height: size }}
       >
+        <div className="rakazo-bot-avatar-picture relative flex h-full w-full items-center justify-center overflow-hidden rounded-full border border-border bg-secondary">
+          <img src={parsed.imageUrl} alt="" className="h-full w-full object-cover" />
+        </div>
         {isWorking ? (
           <svg
-            className="rakazo-bot-avatar-ring absolute pointer-events-none"
+            className="rakazo-bot-avatar-ring rakazo-bot-avatar-ring-working absolute z-10 pointer-events-none"
             style={{
               inset: -4,
               width: size + 8,
@@ -155,14 +149,13 @@ export const BotAvatar = memo(function BotAvatar({
               cx="24"
               cy="24"
               r="22"
-              stroke="#3B82F6"
+              className="stroke-status-working"
               strokeWidth="3.2"
               strokeLinecap="round"
               strokeDasharray="45 80"
             />
           </svg>
         ) : null}
-        <img src={parsed.imageUrl} alt="" className="h-full w-full object-cover" />
       </div>
     );
   }

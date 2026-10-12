@@ -114,12 +114,14 @@ describe("thread event reduction", () => {
       event({
         type: "thread.message.created",
         seq: 4,
+        createdAt: "2026-10-08T12:00:00.000Z",
         payload: {
           messageId: "reply-1",
           role: "user",
           blocks: [{ kind: "text", text: "why this?" }],
           replyToMessageId: "message-1",
           replyQuote: "Done",
+          replyPreview: { role: "user", text: "Done" },
         },
       }),
     );
@@ -128,6 +130,27 @@ describe("thread event reduction", () => {
       role: "user",
       replyToMessageId: "message-1",
       replyQuote: "Done",
+      replyPreview: { role: "user", text: "Done" },
+      createdAt: "2026-10-08T12:00:00.000Z",
+    });
+
+    const updated = reduceThreadSnapshot(
+      next,
+      event({
+        type: "thread.message.updated",
+        seq: 5,
+        payload: {
+          messageId: "reply-1",
+          role: "user",
+          blocks: [{ kind: "text", text: "Updated" }],
+        },
+      }),
+    );
+    expect(updated?.messages.find((message) => message.id === "reply-1")).toMatchObject({
+      replyToMessageId: "message-1",
+      replyQuote: "Done",
+      replyPreview: { role: "user", text: "Done" },
+      createdAt: "2026-10-08T12:00:00.000Z",
     });
   });
 
@@ -495,6 +518,22 @@ describe("thread event reduction", () => {
     );
     expect(progressed?.run?.id).toBe("run-1");
     expect(progressed?.cursor).toBe(4);
+  });
+
+  it("keeps background ticket runs out of the transcript while advancing the cursor", () => {
+    const started = reduceThreadSnapshot(
+      snapshot([]),
+      event({
+        type: "run.started",
+        seq: 7,
+        runId: "ticket-run-1",
+        payload: { trigger: "tickets" },
+      }),
+    );
+
+    expect(started?.run).toBeNull();
+    expect(started?.activeRuns ?? []).toEqual([]);
+    expect(started?.cursor).toBe(7);
   });
 
   it("preserves bot_message when event-sourcing a peer run", () => {

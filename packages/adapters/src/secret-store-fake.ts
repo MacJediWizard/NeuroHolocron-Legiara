@@ -32,10 +32,7 @@ export function infisicalFake() {
     }
     expect(headers.get("authorization")).toMatch(/^Bearer token-[1-9][0-9]*$/);
     expect(Number(headers.get("authorization")?.split("-").at(-1))).toBeLessThanOrEqual(logins);
-    // Fork: keys are written in the fork format; upstream-format keys are still accepted.
-    expect(url.pathname).toMatch(
-      /^\/api\/v3\/secrets\/raw\/(rakazo_[a-f0-9]{24}_[a-f0-9-]{36}|SECRET_[A-Za-z0-9_]+)$/,
-    );
+    expect(url.pathname).toMatch(/^\/api\/v3\/secrets\/raw\/rakazo_[a-f0-9]{24}_[a-f0-9-]{36}$/);
     const key = url.pathname.split("/").at(-1)!;
     const scope = {
       workspaceId: "fake-project",
@@ -52,9 +49,7 @@ export function infisicalFake() {
       });
     else
       expect(body).toEqual(
-        init?.method === "POST"
-          ? { ...scope, secretValue: expect.any(String), secretComment: expect.any(String) }
-          : scope,
+        init?.method === "POST" ? { ...scope, secretValue: expect.any(String) } : scope,
       );
     const status = statuses.shift();
     if (status && status !== 200)

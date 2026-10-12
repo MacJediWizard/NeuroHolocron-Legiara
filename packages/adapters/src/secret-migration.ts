@@ -1,5 +1,5 @@
 import type { AdapterContext, SecretStore } from "@rakazo/adapter-kit";
-import { isInfisicalRef } from "./infisical-secret-store.js";
+import { INFISICAL_REF_PREFIX } from "./infisical-secret-store.js";
 import { deleteSecretBestEffort } from "./secret-store-factory.js";
 
 export interface SecretMigrationRow {
@@ -39,8 +39,7 @@ export async function migrateSecrets(
     let destination: SecretStore | undefined;
     try {
       context.signal.throwIfAborted();
-      // Fork: every `infisical:` ref (including the fork key format) counts as remote.
-      const remote = isInfisicalRef(row.ref);
+      const remote = row.ref.startsWith(INFISICAL_REF_PREFIX);
       const source = remote ? infisical : encrypted;
       const plaintext = await source.load(row.ref, {
         recordId: row.recordId,

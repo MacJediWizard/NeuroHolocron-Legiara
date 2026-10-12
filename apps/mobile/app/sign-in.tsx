@@ -230,7 +230,7 @@ export default function SignIn() {
                       {t("Loading…")}
                     </Text>
                   ) : null}
-                  {reset?.sso && mode !== "forgot" ? (
+                  {reset?.sso && !reset.passwordAuth && mode !== "forgot" ? (
                     <NativeActionButton
                       label={t("Continue with {name}", { name: reset.sso.name })}
                       disabled={pending}
@@ -316,6 +316,15 @@ export default function SignIn() {
                         onPress={() => void submit()}
                         style={{ marginTop: 16 }}
                       />
+                      {reset.sso && mode !== "forgot" ? (
+                        <NativeActionButton
+                          label={t("Continue with {name}", { name: reset.sso.name })}
+                          prominence="quiet"
+                          disabled={pending}
+                          onPress={() => void sso()}
+                          style={{ alignSelf: "center", marginTop: 16 }}
+                        />
+                      ) : null}
                       {mode === "in" && reset?.passwordReset && reset.resetUrl ? (
                         <Pressable
                           accessibilityRole="button"

@@ -42,7 +42,7 @@ gateway is a separate process.
 - Bring-your-own model credentials through Pi
 - App integrations through Composio or Pipedream Connect, plus user-installed Treg, remote MCP, and OpenAPI tool sources
 - Docker, E2B, Daytona, CreateOS, Box, and trusted local-computer support
-- Single sign-on through any OpenID Connect provider, and optional Infisical storage for in-app secrets ([fork features](./docs/fork.md))
+- Single sign-on through any OpenID Connect provider, with Shared Spaces from provider groups ([fork features](./docs/fork.md)), and optional [Infisical storage](./docs/infisical-secrets.md) for in-app secrets
 
 ## Demo
 
@@ -230,7 +230,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development workflow and test m
 ## Documentation
 
 - [Self-hosting](./docs/self-host.md)
-- [Self-host secrets](./docs/self-host-secrets.md) (including the optional Infisical secret store)
+- [Self-host secrets](./docs/self-host-secrets.md)
 - [Fork features, upstream sync, and releases](./docs/fork.md)
 - [Computer runtime and isolation](./docs/computer-runtime.md)
 - [Desktop releases](./docs/desktop-release.md)

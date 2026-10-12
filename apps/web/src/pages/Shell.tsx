@@ -13,12 +13,14 @@ import type {
   ConnectionCatalogItem,
   Group,
   Me,
+  MessageReaction,
   ProductEvent,
   Routine,
   SearchHit,
   Space,
   SpaceMemoryConfig,
   TaughtSkill,
+  ThinkingLevel,
   ThreadMessage,
   ThreadSnapshot,
   VoiceStatus,
@@ -29,17 +31,15 @@ import {
   ATTACHMENT_MAX_COUNT,
   canReactToThreadMessage,
   MESSAGE_REACTIONS,
-  type MessageReaction,
   normalizeCreateBotProfile,
 } from "@rakazo/contracts";
+import type { ComposerMention, SlashActionId } from "@rakazo/core";
 import {
   attachmentsForThread,
   buildComposerMentionOptions,
-  type ComposerMention,
   clampMentionHighlightIndex,
   cronFromPreset,
   formatMessageTime,
-  groupBotsForSidebar,
   groupVoiceChats,
   inferAttachmentMimeType,
   isActive,
@@ -52,18 +52,20 @@ import {
   plainTextFromMarkdown,
   projectMessageReactions,
   reorderBotTo,
+  replyAttachment,
   resolveComposerSendPlan,
   resolveMentionPickerKey,
   runThreadSubscription,
   SLASH_ACTIONS,
-  type SlashActionId,
   searchHitThreadTarget,
   serializeComposerPrompt,
   speechFromBlocks,
+  timeSeparatorIds,
   truncateSlashDescription,
   userVisibleMessages,
   withLiveStreamingProgress,
 } from "@rakazo/core";
+import type { GroupAvatarMember } from "@rakazo/ui-web";
 import {
   AvatarStyleProvider,
   BotAvatar,
@@ -74,7 +76,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   GroupAvatar,
-  type GroupAvatarMember,
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
@@ -89,6 +90,7 @@ import {
   Bell,
   Box,
   ChevronDown,
+  CircleAlert,
   Clock,
   Copy,
   FolderOpen,
@@ -112,17 +114,15 @@ import {
   Settings,
   Smile,
   Square,
+  SquareKanban,
   TextQuote,
   Trash2,
   X,
 } from "lucide-react";
+import type { ClipboardEvent, DragEvent, MutableRefObject, RefObject } from "react";
 import {
-  type ClipboardEvent,
-  type DragEvent,
-  lazy,
-  type MutableRefObject,
+  Fragment,
   memo,
-  type RefObject,
   Suspense,
   useCallback,
   useEffect,
@@ -148,6 +148,7 @@ import { ComputerUpdateProgress } from "../components/ComputerUpdateProgress";
 import { CallCard } from "../components/call/CallCard";
 import { VoiceChatCard } from "../components/call/VoiceChatCard";
 import { ComputerWorkspace } from "../components/computer/ComputerWorkspace";
+import { lazyOverlay } from "../components/ErrorBoundary";
 import { MessageHoverMetadata } from "../components/MessageHoverMetadata";
 import {
   LIVE_TOOL_STEP_WINDOW,
@@ -164,6 +165,10 @@ import { readActivityMode, writeActivityMode } from "../lib/activity-mode";
 import type { ArtifactTarget } from "../lib/artifact-open";
 import { authClient } from "../lib/auth";
 import { takeInitialBootstrap } from "../lib/bootstrap";
+import {
+  getBotsSidebarDensity,
+  subscribeBotsSidebarDensity,
+} from "../lib/bots-sidebar-density-pref";
 import {
   BOTS_SIDEBAR_EDGE_DRAG_PX,
   readBotsSidebarCollapsed,
@@ -187,6 +192,7 @@ import { scheduleFocusPrompt } from "../lib/focus-prompt";
 import { localTimezone } from "../lib/local-timezone";
 import { copyableMessageText } from "../lib/message-text";
 import { messageProviderLabel } from "../lib/messaging";
+import { parseModelOptionKey } from "../lib/model-catalog";
 import {
   isFileDrag,
   isFilePaste,
@@ -202,7 +208,11 @@ import {
   rightPanelStorageKey,
   writeRightPanelState,
 } from "../lib/right-panel-state";
-import { rosterWorkStatusLabel } from "../lib/roster-status";
+import {
+  compactRosterStatusLabel,
+  rosterHasUndismissedRunError,
+  rosterWorkStatusLabel,
+} from "../lib/roster-status";
 import { clearSpaceSelection, rpc, selectedSpaceId, selectSpace } from "../lib/rpc";
 import { readSeenRunErrorIds, rememberSeenRunErrorId } from "../lib/run-error-storage";
 import { sharedInflight } from "../lib/shared-inflight";
@@ -243,10 +253,10 @@ import type { ContextMenuPosition } from "./BotContextMenu";
 import { CreateGroupForm, GroupSettings, memberName } from "./GroupPanel";
 import { HostComputerPrompt } from "./HostComputerPrompt";
 import { ResizableSidePanel } from "./ResizableSidePanel";
+import type { RoutineDraftState } from "./RoutineEditor";
 import {
   draftFromRoutine,
   emptyRoutineDraft,
-  type RoutineDraftState,
   RoutineEditor,
   RoutineListHeader,
   RoutineListRow,
@@ -256,6 +266,7 @@ import type { SettingsSection } from "./SettingsOverlay";
 import { SpaceSearchResults } from "./SpaceSearch";
 import { BotSettings, CreateBotForm } from "./shell/bot-panel";
 import { BotCreatePicker } from "./shell/bot-picker";
+import { ComposerReplyPreview, ReplyLine, TimeSeparator } from "./shell/chat-context";
 import { CommandPalette, isCommandPaletteHotkey } from "./shell/command-palette";
 import {
   ClearConversationDialog,
@@ -265,6 +276,7 @@ import {
   NewSpaceDialog,
   PickerInfoDialog,
   RenameBotSectionDialog,
+  RenameSpaceDialog,
 } from "./shell/dialogs";
 import {
   AppConnectCard,
@@ -273,27 +285,26 @@ import {
   ChoiceCard,
   McpApprovalCard,
 } from "./shell/message-cards";
+import { commitSpaceRename, sidebarGroupsForSpaces } from "./shell/space-sidebar";
 import { WindowChrome } from "./WindowChrome";
 
-const BotContextMenu = lazy(() =>
-  import("./BotContextMenu").then((module) => ({ default: module.BotContextMenu })),
+const BotContextMenu = lazyOverlay(() =>
+  import("./BotContextMenu").then((module) => module.BotContextMenu),
 );
-const MessagingSettingsOverlay = lazy(() =>
-  import("./MessagingSettingsOverlay").then((module) => ({
-    default: module.MessagingSettingsOverlay,
-  })),
+const MessagingSettingsOverlay = lazyOverlay(() =>
+  import("./MessagingSettingsOverlay").then((module) => module.MessagingSettingsOverlay),
 );
-const SettingsOverlay = lazy(() =>
-  import("./SettingsOverlay").then((module) => ({ default: module.SettingsOverlay })),
+const SettingsOverlay = lazyOverlay(() =>
+  import("./SettingsOverlay").then((module) => module.SettingsOverlay),
 );
-const PeerMessagesOverlay = lazy(() =>
-  import("./PeerMessagesOverlay").then((module) => ({ default: module.PeerMessagesOverlay })),
+const PeerMessagesOverlay = lazyOverlay(() =>
+  import("./PeerMessagesOverlay").then((module) => module.PeerMessagesOverlay),
 );
-const PluginsOverlay = lazy(() =>
-  import("./PluginsOverlay").then((module) => ({ default: module.PluginsOverlay })),
+const PluginsOverlay = lazyOverlay(() =>
+  import("./PluginsOverlay").then((module) => module.PluginsOverlay),
 );
-const McpServersOverlay = lazy(() =>
-  import("./McpServersOverlay").then((module) => ({ default: module.McpServersOverlay })),
+const McpServersOverlay = lazyOverlay(() =>
+  import("./McpServersOverlay").then((module) => module.McpServersOverlay),
 );
 
 type PendingAttachment = {
@@ -310,7 +321,7 @@ type PendingBrowserNotification = {
   groupNotification: boolean;
 };
 
-const ATTACHMENT_ACCEPT = ATTACHMENT_ALLOWED_MIME_TYPES.join(",");
+const ATTACHMENT_ACCEPT = [...ATTACHMENT_ALLOWED_MIME_TYPES, ".zip"].join(",");
 /** Identity colour for bots the roster no longer knows about. */
 const FALLBACK_BOT_COLOR = "#85858A";
 const THREAD_SNAPSHOT_TIMEOUT_MS = 2_000;
@@ -436,6 +447,11 @@ export function ShellPage() {
     subscribeToolActivity,
     getToolActivityEnabled,
     () => true,
+  );
+  const botsSidebarDensity = useSyncExternalStore(
+    subscribeBotsSidebarDensity,
+    getBotsSidebarDensity,
+    () => "comfortable",
   );
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [replyTarget, setReplyTarget] = useState<ThreadMessage | null>(null);
@@ -603,6 +619,7 @@ export function ShellPage() {
   const [deleteTarget, setDeleteTarget] = useState<Bot | null>(null);
   const [deleteGroupTarget, setDeleteGroupTarget] = useState<Group | null>(null);
   const [deleteSpaceTarget, setDeleteSpaceTarget] = useState<Space | null>(null);
+  const [renameSpaceTarget, setRenameSpaceTarget] = useState<Space | null>(null);
   const [spaceMenu, setSpaceMenu] = useState<{
     id: string;
     position: ContextMenuPosition;
@@ -614,6 +631,9 @@ export function ShellPage() {
     spaceMenuAnchor.current = null;
   }, [spaceMenu]);
   const closeSpaceMenu = useCallback(() => setSpaceMenu(null), []);
+  const spaceMenuTarget = spaceMenu
+    ? (spaces.find((space) => space.id === spaceMenu.id) ?? null)
+    : null;
   const [clearTarget, setClearTarget] = useState<
     { kind: "bot"; chat: Bot } | { kind: "group"; chat: Group } | null
   >(null);
@@ -718,10 +738,17 @@ export function ShellPage() {
     };
   }, [session.data?.user]);
   const [usage, setUsage] = useState<{
-    inputTokens: number;
-    outputTokens: number;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    totalTokens?: number | null;
     runs: number;
   } | null>(null);
+  const refreshUsage = useCallback(() => {
+    void rpc.usage
+      .summary()
+      .then(setUsage)
+      .catch(() => undefined);
+  }, []);
   const autoBooted = useRef<string | null>(null);
   const routineSavePending = useRef(false);
   const webhookSecretProvisionRef = useRef(new Map<string, Promise<string>>());
@@ -1499,7 +1526,6 @@ export function ShellPage() {
   }, [activeGroup?.id, groupId, notifyBrowserForEvent]);
 
   const sidebarGroups = useMemo(() => {
-    const needle = query.toLowerCase();
     const sidebarSpaces =
       spaces.length > 0
         ? spaces.map((space) =>
@@ -1512,6 +1538,7 @@ export function ShellPage() {
                 name: "Personal",
                 isDefault: true,
                 hasContent: true,
+                canRename: false,
                 canDelete: false,
                 bots,
                 groups,
@@ -1519,59 +1546,7 @@ export function ShellPage() {
               },
             ]
           : [];
-    const showSpaceNames = sidebarSpaces.length > 1;
-    return sidebarSpaces.flatMap((space) => {
-      const visibleBots = space.bots.filter((bot) =>
-        `${bot.name} ${bot.title ?? ""} ${bot.preview ?? ""}`.toLowerCase().includes(needle),
-      );
-      const visibleGroups = space.groups.filter((group) =>
-        `${group.name} ${group.preview}`.toLowerCase().includes(needle),
-      );
-      const sections = groupBotsForSidebar(
-        [
-          ...visibleBots.map((chat) => ({ kind: "bot" as const, chat })),
-          ...visibleGroups.map((chat) => ({ kind: "group" as const, chat })),
-        ].map((item) => ({
-          ...item,
-          id: item.chat.id,
-          parentBotId: item.kind === "bot" ? item.chat.parentBotId : null,
-          pinned: item.chat.pinned,
-          sectionId: item.chat.sectionId,
-        })),
-        space.botSections,
-      ).map((group, index) => ({
-        ...group,
-        sectionId: group.key.startsWith("section:") ? group.key.slice("section:".length) : null,
-        key: showSpaceNames ? `space:${space.id}:${group.key}` : group.key,
-        title: showSpaceNames
-          ? group.title
-            ? `${space.name} · ${group.title}`
-            : space.name
-          : group.title,
-        showLock: showSpaceNames,
-        emptySpaceId: undefined as string | undefined,
-        spaceId: space.id,
-        spaceName: space.name,
-        canDeleteSpace: index === 0 && space.canDelete === true,
-      }));
-      if (sections.length > 0) return sections;
-      // Keep empty spaces selectable; chat clicks are the only switch control.
-      if (!showSpaceNames) return [];
-      if (needle && (space.bots.length > 0 || space.groups.length > 0)) return [];
-      return [
-        {
-          key: `space:${space.id}:empty`,
-          title: space.name,
-          bots: [],
-          sectionId: null,
-          showLock: true,
-          emptySpaceId: space.id,
-          spaceId: space.id,
-          spaceName: space.name,
-          canDeleteSpace: space.canDelete === true,
-        },
-      ];
-    });
+    return sidebarGroupsForSpaces(sidebarSpaces, query);
   }, [bootstrapMe, botSections, bots, groups, spaces, query]);
 
   const openSpaceChat = useCallback(
@@ -2019,11 +1994,11 @@ export function ShellPage() {
     }
     const groupId = activeGroupId.current;
     if (groupId) {
-      void jumpToMessageRef.current({ groupId, messageId });
+      void jumpToMessageRef.current({ groupId, messageId }).catch(() => undefined);
       return;
     }
     const botId = activeBotId.current;
-    if (botId) void jumpToMessageRef.current({ botId, messageId });
+    if (botId) void jumpToMessageRef.current({ botId, messageId }).catch(() => undefined);
   }, []);
   const answerMessage = useCallback(
     async (message: ThreadMessage, text: string, username?: string) => {
@@ -2068,9 +2043,9 @@ export function ShellPage() {
     [t],
   );
   const onAttachmentPick = useCallback(
-    async (files: FileList | null) => {
+    (files: FileList | null) => {
       const threadKey = activeGroupId.current ?? activeBotId.current;
-      if (!threadKey || !files?.length) return;
+      if (!threadKey || !files?.length) return false;
       const existing = attachmentsForThread(pendingAttachments, threadKey);
       const next: PendingAttachment[] = [];
       const skipped: string[] = [];
@@ -2098,6 +2073,7 @@ export function ShellPage() {
       if (next.length) setPendingAttachments((current) => [...current, ...next]);
       setAttachmentNotice(skipped.length ? t`Skipped ${skipped.join(", ")}` : null);
       if (fileInputRef.current) fileInputRef.current.value = "";
+      return next.length > 0;
     },
     [pendingAttachments, t],
   );
@@ -2106,10 +2082,10 @@ export function ShellPage() {
     setPendingAttachments((current) => current.filter((item) => item.id !== attachment.id));
   }, []);
   const sendMessage = useCallback(
-    async (text: string, mentions: ComposerMention[] = []) => {
+    async (text: string, mentions: ComposerMention[], clientNonce: string) => {
       const initialBotTarget = activeBotId.current;
       const initialGroupTarget = activeGroupId.current;
-      if ((!initialBotTarget && !initialGroupTarget) || sending) return;
+      if ((!initialBotTarget && !initialGroupTarget) || sending) return false;
       const originThreadKey = initialGroupTarget ?? initialBotTarget;
       const attachments = attachmentsForThread(pendingAttachments, originThreadKey);
       const plan = resolveComposerSendPlan({
@@ -2117,7 +2093,7 @@ export function ShellPage() {
         mentions,
         hasAttachments: attachments.length > 0,
       });
-      if (plan.isNoOp) return;
+      if (plan.isNoOp) return false;
       const reroutedToGroup = Boolean(
         plan.rerouteGroupId && plan.rerouteGroupId !== initialGroupTarget,
       );
@@ -2140,17 +2116,21 @@ export function ShellPage() {
           cancelFocusPrompt();
         }
       };
+      // Keep the draft cleared once any part of the submission is confirmed accepted.
+      let accepted = false;
       try {
         if (plan.shouldRunRoutines) {
-          const sendNonce = newClientNonce();
-          await Promise.all(
+          // Settle every run first so one that was accepted is never repeated.
+          const runs = await Promise.allSettled(
             plan.routineIds.map((routineId) =>
               rpc.routines.testRun({
                 routineId,
-                clientNonce: `routine-mention:${sendNonce}:${routineId}`,
+                clientNonce: `routine-mention:${clientNonce}:${routineId}`,
               }),
             ),
           );
+          accepted = runs.some((run) => run.status === "fulfilled");
+          for (const run of runs) if (run.status === "rejected") throw run.reason;
         }
         if (!plan.shouldSend) {
           dropDelayedSetup();
@@ -2162,14 +2142,14 @@ export function ShellPage() {
           setAttachmentNotice(null);
           if (reroutedToGroup && groupTarget) {
             navigate(`/app/g/${groupTarget}`);
-            return;
+            return true;
           }
           if (groupTarget && activeGroupId.current === groupTarget) {
             await refreshGroupThreadRef.current(groupTarget);
           } else if (botTarget && activeBotId.current === botTarget) {
             await refreshThreadRef.current(botTarget);
           }
-          return;
+          return true;
         }
         const artifactIds: string[] = [];
         for (const pending of attachments) {
@@ -2185,7 +2165,6 @@ export function ShellPage() {
           );
           artifactIds.push(artifact.id);
         }
-        const clientNonce = newClientNonce();
         if (groupTarget) {
           await rpc.threads.send({
             groupId: groupTarget,
@@ -2196,6 +2175,7 @@ export function ShellPage() {
             replyToMessageId: reroutedToGroup ? undefined : activeReplyTarget?.id,
             replyQuote: reroutedToGroup ? undefined : (activeReplyQuote ?? undefined),
           });
+          accepted = true;
         } else if (botTarget) {
           const sent = await rpc.threads.send({
             botId: botTarget,
@@ -2206,6 +2186,7 @@ export function ShellPage() {
             replyToMessageId: activeReplyTarget?.id,
             replyQuote: activeReplyQuote ?? undefined,
           });
+          accepted = true;
           if (activeBotId.current === botTarget) {
             updateSnapshot((current) =>
               applyThreadSendReceipt(
@@ -2230,12 +2211,13 @@ export function ShellPage() {
         void refreshBots().catch(() => undefined);
         if (reroutedToGroup && groupTarget) {
           navigate(`/app/g/${groupTarget}`);
-          return;
+          return true;
         }
         if (groupTarget && activeGroupId.current === groupTarget) setAttachmentNotice(null);
         if (botTarget && activeBotId.current === botTarget) setAttachmentNotice(null);
         if (groupTarget) void refreshGroupThreadRef.current(groupTarget).catch(() => undefined);
         else if (botTarget) void refreshThreadRef.current(botTarget).catch(() => undefined);
+        return true;
       } catch (error) {
         if (reroutedToGroup && groupTarget) {
           setSendError(errorText(error, t`Failed to send message`));
@@ -2244,6 +2226,7 @@ export function ShellPage() {
         } else if (botTarget && activeBotId.current === botTarget) {
           setSendError(errorText(error, t`Failed to send message`));
         }
+        return accepted;
       } finally {
         sendingRef.current = false;
         setSending(false);
@@ -2670,8 +2653,8 @@ export function ShellPage() {
     return () => window.clearInterval(timer);
   }, [panel, computerOpen, computerBot?.id, active?.id, computer?.state]);
 
-  /** Open the computer view, taking control when possible. Resolves false if booting failed. */
-  async function openComputer(botId?: string) {
+  /** Open the computer view. Only an explicit Take control asks for the lease. */
+  async function openComputer(botId?: string, takeControl = false) {
     const id = botId ?? active?.id;
     if (!id) return false;
     const bot = botsRef.current.find((candidate) => candidate.id === id);
@@ -2687,7 +2670,7 @@ export function ShellPage() {
     }
     setComputerOpen(true);
     computerVisible.current = true;
-    const needsTakeover = !userHoldsComputerControl(targetComputer, id);
+    const needsTakeover = takeControl && !userHoldsComputerControl(targetComputer, id);
     const blocked = computerTakeoverBlocked(targetComputer, snapshot?.run?.status);
     try {
       await bootComputer({
@@ -2707,28 +2690,23 @@ export function ShellPage() {
     void openComputerRef.current(botId);
   }, []);
 
-  const releaseComputer = useCallback(
-    async (reason?: ComputerReleaseReason) => {
-      const botId = computerBotIdRef.current ?? activeBotId.current;
-      if (!botId) return;
-      try {
-        await rpc.computer.release({ botId, reason });
-        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
-        setComputerOpen(false);
-        const groupId = activeGroupId.current;
-        if (groupId) {
-          await refreshGroupThreadRef.current(groupId).catch(() => undefined);
-        } else {
-          await refreshThreadRef.current(botId).catch(() => undefined);
-        }
-      } catch {
-        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
-        setComputerError(t`Could not continue`);
-        setComputerErrorFromScreen(false);
+  async function releaseComputer(reason?: ComputerReleaseReason) {
+    const botId = computerBotIdRef.current ?? activeBotId.current;
+    if (!botId) return;
+    try {
+      await rpc.computer.release({ botId, reason });
+      if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
+      await refreshComputerFor(botId).catch(() => undefined);
+      const groupId = activeGroupId.current;
+      if (groupId) {
+        await refreshGroupThreadRef.current(groupId).catch(() => undefined);
       }
-    },
-    [t],
-  );
+    } catch {
+      if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
+      setComputerError(t`Could not continue`);
+      setComputerErrorFromScreen(false);
+    }
+  }
 
   function dismissComposerError() {
     // The strip shows one message at a time, so only dismiss the run failure when it is the
@@ -2843,6 +2821,7 @@ export function ShellPage() {
       ) : null}
       <aside
         data-testid="bots-sidebar"
+        data-bots-sidebar-density={botsSidebarDensity}
         data-collapsed={botsSidebarCollapsed ? "true" : "false"}
         inert={botsSidebarCollapsed && !mobileSidebarOpen ? true : undefined}
         className={`absolute inset-y-0 start-0 z-40 flex w-[calc(100%-48px)] max-w-[316px] shrink-0 flex-col border-e border-sidebar-border bg-sidebar transition-[transform,width,opacity] md:static md:z-auto md:translate-x-0 ${
@@ -2986,85 +2965,99 @@ export function ShellPage() {
                   nestedRows.flatMap((row) =>
                     row.item.kind === "bot" && row.parentId === parentId ? [row.item.chat.id] : [],
                   );
+                const hasSpaceActions = group.canRenameSpace || group.canDeleteSpace;
                 return (
                   <div key={group.key} data-sidebar-group={group.key}>
-                    {group.title ? (
-                      <div className="flex items-center pt-3 pb-0.5">
-                        <button
-                          type="button"
-                          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2.5 py-1 text-[11px] font-semibold tracking-wider uppercase text-muted-foreground/60 hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
-                          onClick={() => {
-                            if (group.emptySpaceId) {
-                              openSpaceChat(group.emptySpaceId, "/onboarding");
-                              return;
-                            }
-                            toggleSidebarSection(group.key);
-                          }}
-                          onContextMenu={
-                            group.sectionId
-                              ? (event) => {
-                                  event.preventDefault();
-                                  // Prefer section rename over delete-space when both apply;
-                                  // the dedicated space-actions button still opens the space menu.
-                                  const sections =
-                                    group.spaceId === bootstrapMe?.spaceId
-                                      ? botSections
-                                      : (spaces.find((space) => space.id === group.spaceId)
-                                          ?.botSections ?? []);
-                                  const section = sections.find(
-                                    (item) => item.id === group.sectionId,
-                                  );
-                                  if (!section) return;
-                                  sectionMenuAnchor.current = event.currentTarget;
-                                  setSectionMenu({
-                                    section,
-                                    spaceId: group.spaceId,
-                                    position: { x: event.clientX, y: event.clientY },
-                                  });
-                                }
-                              : group.canDeleteSpace
+                    {group.title || hasSpaceActions ? (
+                      <div
+                        className={
+                          group.title && hasSpaceActions
+                            ? "grid pt-3 pb-0.5"
+                            : `flex items-center pt-3 pb-0.5${group.title ? "" : " justify-end"}`
+                        }
+                      >
+                        {group.title ? (
+                          <button
+                            type="button"
+                            className={`flex min-w-0 items-center justify-between gap-2 rounded-lg px-2.5 py-1 text-[11px] font-semibold tracking-wider uppercase text-muted-foreground/60 hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring ${hasSpaceActions ? "col-start-1 row-start-1 w-full pe-8" : "flex-1"}`}
+                            onClick={() => {
+                              if (group.emptySpaceId) {
+                                openSpaceChat(group.emptySpaceId, "/onboarding");
+                                return;
+                              }
+                              toggleSidebarSection(group.key);
+                            }}
+                            onContextMenu={
+                              group.sectionId
                                 ? (event) => {
                                     event.preventDefault();
-                                    spaceMenuAnchor.current = event.currentTarget;
-                                    setSpaceMenu({
-                                      id: group.spaceId,
+                                    // Prefer section rename over the space menu when both apply;
+                                    // the dedicated space-actions button still opens the space menu.
+                                    const sections =
+                                      group.spaceId === bootstrapMe?.spaceId
+                                        ? botSections
+                                        : (spaces.find((space) => space.id === group.spaceId)
+                                            ?.botSections ?? []);
+                                    const section = sections.find(
+                                      (item) => item.id === group.sectionId,
+                                    );
+                                    if (!section) return;
+                                    sectionMenuAnchor.current = event.currentTarget;
+                                    setSectionMenu({
+                                      section,
+                                      spaceId: group.spaceId,
                                       position: { x: event.clientX, y: event.clientY },
                                     });
                                   }
-                                : undefined
-                          }
-                          aria-expanded={group.emptySpaceId ? undefined : !collapsed}
-                          aria-label={
-                            group.emptySpaceId
-                              ? t`Open ${group.title}`
-                              : collapsed
-                                ? t`Expand ${group.title}`
-                                : t`Collapse ${group.title}`
-                          }
-                        >
-                          <span className="flex min-w-0 items-center gap-1.5 truncate">
-                            {group.showLock ? (
-                              <Lock size={11} strokeWidth={2} aria-hidden="true" />
-                            ) : null}
-                            <span className="truncate">{group.title}</span>
-                          </span>
-                          {group.emptySpaceId ? null : (
-                            <ChevronDown
-                              size={14}
-                              strokeWidth={1.8}
-                              className={
-                                collapsed
-                                  ? "-rotate-90 transition-transform"
-                                  : "transition-transform"
-                              }
-                              aria-hidden="true"
-                            />
-                          )}
-                        </button>
-                        {group.canDeleteSpace ? (
+                                : hasSpaceActions
+                                  ? (event) => {
+                                      event.preventDefault();
+                                      spaceMenuAnchor.current = event.currentTarget;
+                                      setSpaceMenu({
+                                        id: group.spaceId,
+                                        position: { x: event.clientX, y: event.clientY },
+                                      });
+                                    }
+                                  : undefined
+                            }
+                            aria-expanded={group.emptySpaceId ? undefined : !collapsed}
+                            aria-label={
+                              group.emptySpaceId
+                                ? t`Open ${group.title}`
+                                : collapsed
+                                  ? t`Expand ${group.title}`
+                                  : t`Collapse ${group.title}`
+                            }
+                          >
+                            <span className="flex min-w-0 items-center gap-1.5 truncate">
+                              {group.showLock ? (
+                                <Lock size={11} strokeWidth={2} aria-hidden="true" />
+                              ) : null}
+                              <span className="truncate">{group.title}</span>
+                            </span>
+                            {group.emptySpaceId ? null : (
+                              <ChevronDown
+                                size={14}
+                                strokeWidth={1.8}
+                                className={
+                                  collapsed
+                                    ? "-rotate-90 transition-transform"
+                                    : "transition-transform"
+                                }
+                                aria-hidden="true"
+                              />
+                            )}
+                          </button>
+                        ) : null}
+                        {hasSpaceActions ? (
                           <Button
                             variant="ghost"
                             size="icon-sm"
+                            className={
+                              group.title
+                                ? "col-start-1 row-start-1 justify-self-end self-center"
+                                : undefined
+                            }
                             aria-label={t`Actions for ${group.spaceName}`}
                             onClick={(event) => {
                               const rect = event.currentTarget.getBoundingClientRect();
@@ -3087,15 +3080,30 @@ export function ShellPage() {
                         const selected =
                           (item.kind === "bot" && !inGroup && active?.id === item.chat.id) ||
                           (item.kind === "group" && inGroup && activeGroup?.id === item.chat.id);
+                        const compact = botsSidebarDensity === "compact";
                         const workStatusLabel =
                           item.kind === "bot" ? rosterWorkStatusLabel(item.chat.status) : null;
-                        const rosterLine =
-                          workStatusLabel ??
-                          (item.kind === "bot"
-                            ? item.chat.preview ||
-                              (item.chat.status !== "idle" ? item.chat.status : "")
-                            : item.chat.preview ||
-                              item.chat.members.map((member) => member.name).join(", "));
+                        const rowError =
+                          item.kind === "bot" &&
+                          (rosterHasUndismissedRunError(
+                            item.chat.runErrorId,
+                            dismissedRunErrorIds,
+                          ) ||
+                            (active?.id === item.chat.id && Boolean(displayedRunError)));
+                        const compactStatusLabel =
+                          compact && item.kind === "bot"
+                            ? rowError
+                              ? t`Error`
+                              : compactRosterStatusLabel(item.chat.status)
+                            : null;
+                        const rosterLine = compact
+                          ? compactStatusLabel
+                          : (workStatusLabel ??
+                            (item.kind === "bot"
+                              ? item.chat.preview ||
+                                (item.chat.status !== "idle" ? item.chat.status : "")
+                              : item.chat.preview ||
+                                item.chat.members.map((member) => member.name).join(", ")));
                         return (
                           <div
                             key={`${item.kind}:${item.chat.id}`}
@@ -3136,9 +3144,12 @@ export function ShellPage() {
                               type="button"
                               draggable={item.kind === "bot"}
                               data-roster-bot-id={item.kind === "bot" ? item.chat.id : undefined}
+                              data-roster-unread={item.chat.unread ? "true" : undefined}
+                              data-roster-error={rowError && compact ? "true" : undefined}
                               data-roster-depth={
                                 item.kind === "bot" && treeActive ? depth : undefined
                               }
+                              aria-current={selected ? "page" : undefined}
                               aria-keyshortcuts={
                                 item.kind === "bot" ? "Alt+ArrowUp Alt+ArrowDown" : undefined
                               }
@@ -3203,7 +3214,11 @@ export function ShellPage() {
                                   position: { x: event.clientX, y: event.clientY },
                                 });
                               }}
-                              className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-[10px] text-start ${
+                              className={`flex w-full items-center ${
+                                compact
+                                  ? "min-h-11 gap-2 rounded-xl px-2.5 py-1.5"
+                                  : "gap-3 rounded-xl px-2.5 py-[10px]"
+                              } text-start ${
                                 item.kind === "bot" ? "cursor-grab active:cursor-grabbing" : ""
                               } ${
                                 selected ? "bg-sidebar-accent" : "group-hover/row:bg-sidebar-accent"
@@ -3218,7 +3233,7 @@ export function ShellPage() {
                                 <BotAvatar
                                   color={item.chat.color}
                                   identity={item.chat.id}
-                                  size={38}
+                                  size={compact ? 28 : 38}
                                   status={item.chat.status}
                                 />
                               ) : (
@@ -3228,7 +3243,7 @@ export function ShellPage() {
                                       ? (activeSnapshot.members ?? item.chat.members)
                                       : item.chat.members
                                   }
-                                  size={38}
+                                  size={compact ? 28 : 38}
                                 />
                               )}
                               <div className="min-w-0 flex-1">
@@ -3250,9 +3265,11 @@ export function ShellPage() {
                                     ) : null}
                                   </div>
                                   <div className="flex shrink-0 items-center gap-1.5">
-                                    <span className="text-[11.5px] text-muted-foreground/60 tabular-nums">
-                                      {formatRosterTime(item.chat.updatedAt)}
-                                    </span>
+                                    {!compact ? (
+                                      <span className="text-[11.5px] text-muted-foreground/60 tabular-nums">
+                                        {formatRosterTime(item.chat.updatedAt)}
+                                      </span>
+                                    ) : null}
                                     {item.chat.unread ? (
                                       <span
                                         aria-hidden="true"
@@ -3261,23 +3278,53 @@ export function ShellPage() {
                                     ) : null}
                                   </div>
                                 </div>
-                                {item.kind === "bot" && item.chat.title ? (
+                                {!compact && item.kind === "bot" && item.chat.title ? (
                                   <div className="mt-1 flex">
                                     <span className="max-w-full truncate rounded-md border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
                                       {item.chat.title}
                                     </span>
                                   </div>
                                 ) : null}
-                                <div
-                                  dir="auto"
-                                  className={`mt-1 line-clamp-2 text-[12.5px] break-words whitespace-normal ${
-                                    workStatusLabel || item.chat.unread
-                                      ? "font-medium text-foreground/75"
-                                      : "text-muted-foreground/60"
-                                  }`}
-                                >
-                                  {rosterLine}
-                                </div>
+                                {compact ? (
+                                  compactStatusLabel ? (
+                                    <div
+                                      dir="auto"
+                                      data-roster-status={
+                                        rowError
+                                          ? "error"
+                                          : item.kind === "bot"
+                                            ? item.chat.status
+                                            : undefined
+                                      }
+                                      className={`mt-0.5 flex items-center gap-1 text-[11.5px] ${
+                                        rowError
+                                          ? "font-medium text-destructive"
+                                          : workStatusLabel
+                                            ? "font-semibold text-status-working"
+                                            : "font-medium text-foreground/75"
+                                      }`}
+                                    >
+                                      {rowError ? (
+                                        <CircleAlert size={12} aria-hidden="true" />
+                                      ) : null}
+                                      <span>{compactStatusLabel}</span>
+                                    </div>
+                                  ) : null
+                                ) : (
+                                  <div
+                                    dir="auto"
+                                    data-roster-preview={!workStatusLabel ? "true" : undefined}
+                                    className={`mt-1 line-clamp-2 text-[12.5px] break-words whitespace-normal ${
+                                      workStatusLabel
+                                        ? "font-semibold text-status-working"
+                                        : item.chat.unread
+                                          ? "font-medium text-foreground/75"
+                                          : "text-muted-foreground/60"
+                                    }`}
+                                  >
+                                    {rosterLine}
+                                  </div>
+                                )}
                               </div>
                             </button>
                           </div>
@@ -3401,6 +3448,20 @@ export function ShellPage() {
               align="start"
               className="w-[calc(316px-1.5rem)] max-w-[calc(100vw-3rem)] gap-0 p-1 data-closed:animate-none"
             >
+              {bootstrapMe?.ticketBoardEnabled ? (
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start font-normal"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setMobileSidebarOpen(false);
+                    navigate("/app/board");
+                  }}
+                >
+                  <SquareKanban className="text-muted-foreground" strokeWidth={1.75} />
+                  <Trans>Board</Trans>
+                </Button>
+              ) : null}
               <Button
                 variant="ghost"
                 className="w-full justify-start font-normal"
@@ -3431,10 +3492,6 @@ export function ShellPage() {
                 aria-label={t`Usage`}
                 onClick={() => {
                   setMenuOpen(false);
-                  void rpc.usage
-                    .summary()
-                    .then(setUsage)
-                    .catch(() => undefined);
                   openSettings("usage");
                 }}
               >
@@ -3681,6 +3738,7 @@ export function ShellPage() {
                   }
                 : undefined
             }
+            artifactTarget={transcriptArtifactTarget}
             replyTarget={activeReplyTarget}
             replyQuote={activeReplyQuote}
             replyTargetName={replyTargetName}
@@ -3698,10 +3756,6 @@ export function ShellPage() {
                 return;
               }
               if (action === "settings-usage") {
-                void rpc.usage
-                  .summary()
-                  .then(setUsage)
-                  .catch(() => undefined);
                 openSettings("usage");
               }
             }}
@@ -3883,8 +3937,7 @@ export function ShellPage() {
                   setGroups((current) =>
                     current.map((group) => (group.id === updated.id ? updated : group)),
                   );
-                  setPanel(null);
-                  await Promise.all([refreshBots(), refreshGroupThread(activeGroup.id)]).catch(
+                  void Promise.all([refreshBots(), refreshGroupThread(activeGroup.id)]).catch(
                     () => undefined,
                   );
                 }}
@@ -3896,6 +3949,8 @@ export function ShellPage() {
                   navigate(firstThreadRoute(bots, remainingGroups), { replace: true });
                   await refreshBots().catch(() => undefined);
                 }}
+                onClose={() => setPanel(null)}
+                covered={computerOpen}
               />
             ) : null}
             {panel === "create" ? (
@@ -3917,8 +3972,12 @@ export function ShellPage() {
                       mode: computerMode,
                     });
                   }
-                  await rpc.bots.update({ botId: active.id, ...patch });
-                  await refreshBots();
+                  const updated = await rpc.bots.update({ botId: active.id, ...patch });
+                  setBots((current) =>
+                    current.map((bot) => (bot.id === updated.id ? updated : bot)),
+                  );
+                  // Persistence succeeded; a failed navigation refresh must not undo the tool edit.
+                  await refreshBots().catch(() => undefined);
                 }}
                 onExport={async () => {
                   const manifest = await rpc.export.bot({ botId: active.id });
@@ -3990,6 +4049,16 @@ export function ShellPage() {
                       await ensureWebhookSecret(targetBotId);
                     }
                     const crons = routineDraft.schedules.map(cronFromPreset);
+                    const model = routineDraft.modelKey
+                      ? parseModelOptionKey(routineDraft.modelKey)
+                      : null;
+                    const routineModel = {
+                      modelProvider: model?.provider ?? null,
+                      modelId: model?.modelId ?? null,
+                      thinkingLevel: (model && routineDraft.thinkingLevel
+                        ? routineDraft.thinkingLevel
+                        : null) as ThinkingLevel | null,
+                    };
                     let saved: Routine;
                     if (targetRoutine) {
                       const armOneShot = routineNeedsOneShotArm(targetRoutine, crons);
@@ -4015,6 +4084,11 @@ export function ShellPage() {
                         webhookEnabled: routineDraft.webhookEnabled,
                         githubEnabled: routineDraft.githubEnabled,
                         messageProvider: routineDraft.messageProvider,
+                        ...(routineModel.modelProvider !== targetRoutine.modelProvider ||
+                        routineModel.modelId !== targetRoutine.modelId ||
+                        routineModel.thinkingLevel !== targetRoutine.thinkingLevel
+                          ? routineModel
+                          : {}),
                         ...(runAt ? { runAt } : {}),
                       });
                     } else {
@@ -4029,6 +4103,7 @@ export function ShellPage() {
                         webhookEnabled: routineDraft.webhookEnabled,
                         githubEnabled: routineDraft.githubEnabled,
                         messageProvider: routineDraft.messageProvider,
+                        ...routineModel,
                       });
                     }
                     if (
@@ -4228,17 +4303,29 @@ export function ShellPage() {
               sideOffset={0}
               className="w-[220px]"
             >
-              <DropdownMenuItem
-                variant="destructive"
-                onClick={() => {
-                  const target = spaces.find((space) => space.id === spaceMenu.id);
-                  if (target) setDeleteSpaceTarget(target);
-                  setSpaceMenu(null);
-                }}
-              >
-                <Trash2 />
-                {t`Delete space`}
-              </DropdownMenuItem>
+              {spaceMenuTarget?.canRename ? (
+                <DropdownMenuItem
+                  onClick={() => {
+                    setRenameSpaceTarget(spaceMenuTarget);
+                    setSpaceMenu(null);
+                  }}
+                >
+                  <Pencil />
+                  {t`Rename space`}
+                </DropdownMenuItem>
+              ) : null}
+              {spaceMenuTarget?.canDelete ? (
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={() => {
+                    setDeleteSpaceTarget(spaceMenuTarget);
+                    setSpaceMenu(null);
+                  }}
+                >
+                  <Trash2 />
+                  {t`Delete space`}
+                </DropdownMenuItem>
+              ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
@@ -4266,6 +4353,28 @@ export function ShellPage() {
               setDeleteGroupTarget(null);
               setPanel(null);
               await refreshBots(true);
+            }}
+          />
+        ) : null}
+
+        {renameSpaceTarget ? (
+          <RenameSpaceDialog
+            space={renameSpaceTarget}
+            onCancel={() => setRenameSpaceTarget(null)}
+            onConfirm={async (name) => {
+              const spaceId = renameSpaceTarget.id;
+              await commitSpaceRename({
+                rename: async () => {
+                  await rpc.spaces.rename({ spaceId, name });
+                },
+                apply: () => {
+                  setSpaces((current) =>
+                    current.map((space) => (space.id === spaceId ? { ...space, name } : space)),
+                  );
+                },
+                refresh: () => refreshBots(),
+              });
+              setRenameSpaceTarget(null);
             }}
           />
         ) : null}
@@ -4465,6 +4574,7 @@ export function ShellPage() {
             name={userName}
             email={session.data?.user.email}
             usage={usage}
+            onUsageOpen={refreshUsage}
             initialSection={settingsSection}
             avatarStyle={bootstrapMe?.avatarStyle ?? "robot"}
             isDeploymentOwner={bootstrapMe?.isDeploymentOwner === true}
@@ -4594,6 +4704,17 @@ export function ShellPage() {
                     takeoverRequested={Boolean(computer?.takeoverRequested)}
                     onRelease={releaseComputer}
                   />
+                ) : computer?.state === "running" &&
+                  !computerTakeoverBlocked(computer, snapshot?.run?.status) ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={booting}
+                    onClick={() => void openComputer(computerBot.id, true)}
+                  >
+                    <Trans>Take control</Trans>
+                  </Button>
                 ) : null}
                 {computerBot && !recordingSkill ? (
                   <TeachComputerOverlayControl
@@ -4642,7 +4763,7 @@ export function ShellPage() {
                   computer?.state === "running" &&
                   !hasControl &&
                   !computerTakeoverBlocked(computer, snapshot?.run?.status)
-                    ? () => openComputer(computerBot.id)
+                    ? () => openComputer(computerBot.id, true)
                     : undefined
                 }
               >
@@ -4742,7 +4863,7 @@ const Transcript = memo(function Transcript({
   onJumpToMessage: (messageId: string) => void;
   onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
   memberName?: (botId: string | undefined) => string | undefined;
-  peerBot: (botId: string) => { color: string; status?: string } | undefined;
+  peerBot: (botId: string) => { name?: string; color: string; status?: string } | undefined;
   onRefresh: () => Promise<void>;
   onBotChanged: () => Promise<void>;
   onAddRoutine: (name: string, prompt: string) => void;
@@ -4764,6 +4885,11 @@ const Transcript = memo(function Transcript({
     [messages],
   );
   const reactionView = useMemo(() => projectMessageReactions(messages), [messages]);
+  const separatorIds = timeSeparatorIds(
+    reactionView.visibleMessages.filter((message) =>
+      messageHasVisibleBlocks(message.blocks, showToolActivity),
+    ),
+  );
   const workingBotName = workingBots.length === 1 ? workingBots[0]?.name : undefined;
   const workingLabel =
     workingBotName != null && workingBotName !== ""
@@ -4913,7 +5039,18 @@ const Transcript = memo(function Transcript({
     element.addEventListener("scrollend", endJumpScroll, { once: true });
     window.clearTimeout(jumpScrollTimer.current);
     jumpScrollTimer.current = window.setTimeout(endJumpScroll, 2_000);
-    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    row.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+    row.animate(
+      reducedMotion
+        ? [{ backgroundColor: "var(--muted)" }, { backgroundColor: "var(--muted)" }]
+        : [
+            { backgroundColor: "transparent" },
+            { backgroundColor: "var(--muted)" },
+            { backgroundColor: "transparent" },
+          ],
+      { duration: 1200 },
+    );
     onScrollRequestHandled();
   }, [messages, scrollRequest, scrollRef, endJumpScroll, onScrollRequestHandled]);
 
@@ -5011,11 +5148,15 @@ const Transcript = memo(function Transcript({
         {groupVoiceChats(reactionView.visibleMessages).map((item) => {
           if (item.kind === "voiceChat") {
             return (
-              <VoiceChatCard
-                key={item.key}
-                group={item}
-                revealMessageId={scrollRequest?.messageId}
-              />
+              <div key={item.key}>
+                {item.messages[0] && separatorIds.has(item.messages[0].id) ? (
+                  <TimeSeparator
+                    createdAt={item.messages[0].createdAt}
+                    locale={i18n.locale || "en"}
+                  />
+                ) : null}
+                <VoiceChatCard group={item} revealMessageId={scrollRequest?.messageId} />
+              </div>
             );
           }
           const message = item.message;
@@ -5023,124 +5164,127 @@ const Transcript = memo(function Transcript({
           const peerReceipt = isPeerReceiptBlocks(message.blocks);
           const messageReactions = reactionView.reactions.get(message.id);
           return (
-            <div
-              key={message.id}
-              data-message-id={message.id}
-              className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
-            >
-              {message.role === "user" && message.author && message.author.id !== viewerId ? (
-                <div
-                  data-testid="message-author"
-                  className="mb-1 text-end text-[13px] font-semibold text-muted-foreground"
-                  dir="auto"
-                >
-                  {message.author.name}
-                </div>
+            <Fragment key={message.id}>
+              {separatorIds.has(message.id) ? (
+                <TimeSeparator createdAt={message.createdAt} locale={i18n.locale || "en"} />
               ) : null}
               <div
-                className={
-                  peerReceipt
-                    ? undefined
-                    : `relative flex ${message.role === "user" ? "justify-end" : "justify-start"}`
-                }
+                data-message-id={message.id}
+                className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
               >
+                {message.role === "user" && message.author && message.author.id !== viewerId ? (
+                  <div
+                    data-testid="message-author"
+                    className="mb-1 text-end text-[13px] font-semibold text-muted-foreground"
+                    dir="auto"
+                  >
+                    {message.author.name}
+                  </div>
+                ) : null}
                 <div
-                  data-testid={peerReceipt ? undefined : "message-bubble-frame"}
                   className={
                     peerReceipt
                       ? undefined
-                      : `relative w-fit min-w-0 ${
-                          message.role === "user"
-                            ? "max-w-[min(84%,calc(100%_-_8rem))] [@media(hover:none)]:max-w-[84%]"
-                            : "max-w-[min(88%,calc(100%_-_8rem))] [@media(hover:none)]:max-w-[88%]"
-                        }`
+                      : `relative flex ${message.role === "user" ? "justify-end" : "justify-start"}`
                   }
                 >
-                  <MessageView
-                    artifactTarget={artifactTarget}
-                    message={message}
-                    canAnswer={message.id === answerableAskMessageId}
-                    onOpenBot={onOpenBot}
-                    onOpenPeerMessages={onOpenPeerMessages}
-                    onAnswer={onAnswer}
-                    speakerName={
+                  <div
+                    data-testid={peerReceipt ? undefined : "message-bubble-frame"}
+                    className={
                       peerReceipt
                         ? undefined
-                        : message.role === "bot"
-                          ? memberName?.(message.botId)
-                          : undefined
+                        : `relative w-fit min-w-0 ${
+                            message.role === "user"
+                              ? "max-w-[min(84%,calc(100%_-_8rem))] [@media(hover:none)]:max-w-[84%]"
+                              : "max-w-[min(88%,calc(100%_-_8rem))] [@media(hover:none)]:max-w-[88%]"
+                          }`
                     }
-                    memberName={memberName}
-                    peerBot={peerBot}
-                    replyPreview={
-                      message.replyToMessageId
-                        ? messageById.get(message.replyToMessageId)
-                        : undefined
-                    }
-                    replyToMessageId={message.replyToMessageId}
-                    onJumpToMessage={onJumpToMessage}
-                    onRefresh={onRefresh}
-                    onBotChanged={onBotChanged}
-                    onAddRoutine={onAddRoutine}
-                    voiceReady={voiceReady}
-                    speaking={speakingMessageId === message.id}
-                    onSpeak={() => onSpeak(message)}
-                    onOpenComputer={onOpenComputer}
-                    showToolActivity={showToolActivity}
-                  />
-                  {peerReceipt ? null : (
-                    <MessageHoverActions
+                  >
+                    <MessageView
+                      artifactTarget={artifactTarget}
                       message={message}
-                      side={message.role === "user" ? "start" : "end"}
-                      onReply={onReply}
-                      onReact={onReact}
+                      canAnswer={message.id === answerableAskMessageId}
+                      onOpenBot={onOpenBot}
+                      onOpenPeerMessages={onOpenPeerMessages}
+                      onAnswer={onAnswer}
+                      speakerName={
+                        peerReceipt
+                          ? undefined
+                          : message.role === "bot"
+                            ? memberName?.(message.botId)
+                            : undefined
+                      }
+                      memberName={memberName}
+                      peerBot={peerBot}
+                      replyParent={
+                        message.replyToMessageId
+                          ? messageById.get(message.replyToMessageId)
+                          : undefined
+                      }
+                      onJumpToMessage={onJumpToMessage}
+                      onRefresh={onRefresh}
+                      onBotChanged={onBotChanged}
+                      onAddRoutine={onAddRoutine}
+                      voiceReady={voiceReady}
+                      speaking={speakingMessageId === message.id}
+                      onSpeak={() => onSpeak(message)}
+                      onOpenComputer={onOpenComputer}
+                      showToolActivity={showToolActivity}
                     />
-                  )}
+                    {peerReceipt ? null : (
+                      <MessageHoverActions
+                        message={message}
+                        side={message.role === "user" ? "start" : "end"}
+                        onReply={onReply}
+                        onReact={onReact}
+                      />
+                    )}
+                  </div>
                 </div>
+                {!peerReceipt && !message.id.startsWith("progress:") ? (
+                  <time
+                    dateTime={message.createdAt}
+                    data-testid="message-hover-time"
+                    className={cn(
+                      "pointer-events-none absolute top-1 z-10 text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 group-has-[[aria-expanded=true]]/message:opacity-100 [@media(hover:none)]:transition-none",
+                      // Hover keeps the date in the side margin. Touch leaves that margin for the bubble and drops the revealed time under it.
+                      message.role === "user"
+                        ? "start-0 max-w-[max(8rem,16%)] text-start"
+                        : "end-0 max-w-[max(8rem,12%)] text-end",
+                      "[@media(hover:none)]:group-hover/message:static [@media(hover:none)]:group-focus-within/message:static [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:static",
+                      "[@media(hover:none)]:group-hover/message:block [@media(hover:none)]:group-focus-within/message:block [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:block",
+                      "[@media(hover:none)]:group-hover/message:mt-1 [@media(hover:none)]:group-focus-within/message:mt-1 [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:mt-1",
+                      "[@media(hover:none)]:group-hover/message:w-full [@media(hover:none)]:group-focus-within/message:w-full [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:w-full",
+                      "[@media(hover:none)]:group-hover/message:max-w-none [@media(hover:none)]:group-focus-within/message:max-w-none [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:max-w-none",
+                      message.role === "user"
+                        ? "[@media(hover:none)]:group-hover/message:text-end [@media(hover:none)]:group-focus-within/message:text-end [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:text-end"
+                        : "[@media(hover:none)]:group-hover/message:text-start [@media(hover:none)]:group-focus-within/message:text-start [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:text-start",
+                    )}
+                  >
+                    {formatMessageTime(message.createdAt, i18n.locale || "en")}
+                  </time>
+                ) : null}
+                {!peerReceipt && messageReactions ? (
+                  <div
+                    data-testid="message-reactions"
+                    className={cn(
+                      "mt-1 flex flex-wrap gap-1",
+                      message.role === "user" && "justify-end",
+                    )}
+                  >
+                    {[...messageReactions].map(([emoji, count]) => (
+                      <span
+                        key={emoji}
+                        className="rounded-full border border-border bg-muted px-2 py-0.5 text-xs"
+                      >
+                        {emoji}
+                        {count > 1 ? ` ${count}` : ""}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
               </div>
-              {!peerReceipt && !message.id.startsWith("progress:") ? (
-                <time
-                  dateTime={message.createdAt}
-                  data-testid="message-hover-time"
-                  className={cn(
-                    "pointer-events-none absolute top-1 z-10 text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 group-has-[[aria-expanded=true]]/message:opacity-100 [@media(hover:none)]:transition-none",
-                    // Hover keeps the date in the side margin. Touch leaves that margin for the bubble and drops the revealed time under it.
-                    message.role === "user"
-                      ? "start-0 max-w-[max(8rem,16%)] text-start"
-                      : "end-0 max-w-[max(8rem,12%)] text-end",
-                    "[@media(hover:none)]:group-hover/message:static [@media(hover:none)]:group-focus-within/message:static [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:static",
-                    "[@media(hover:none)]:group-hover/message:block [@media(hover:none)]:group-focus-within/message:block [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:block",
-                    "[@media(hover:none)]:group-hover/message:mt-1 [@media(hover:none)]:group-focus-within/message:mt-1 [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:mt-1",
-                    "[@media(hover:none)]:group-hover/message:w-full [@media(hover:none)]:group-focus-within/message:w-full [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:w-full",
-                    "[@media(hover:none)]:group-hover/message:max-w-none [@media(hover:none)]:group-focus-within/message:max-w-none [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:max-w-none",
-                    message.role === "user"
-                      ? "[@media(hover:none)]:group-hover/message:text-end [@media(hover:none)]:group-focus-within/message:text-end [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:text-end"
-                      : "[@media(hover:none)]:group-hover/message:text-start [@media(hover:none)]:group-focus-within/message:text-start [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:text-start",
-                  )}
-                >
-                  {formatMessageTime(message.createdAt, i18n.locale || "en")}
-                </time>
-              ) : null}
-              {!peerReceipt && messageReactions ? (
-                <div
-                  data-testid="message-reactions"
-                  className={cn(
-                    "mt-1 flex flex-wrap gap-1",
-                    message.role === "user" && "justify-end",
-                  )}
-                >
-                  {[...messageReactions].map(([emoji, count]) => (
-                    <span
-                      key={emoji}
-                      className="rounded-full border border-border bg-muted px-2 py-0.5 text-xs"
-                    >
-                      {emoji}
-                      {count > 1 ? ` ${count}` : ""}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
+            </Fragment>
           );
         })}
         {running &&
@@ -5256,7 +5400,8 @@ const QuoteSelectionButton = memo(function QuoteSelectionButton({
   );
 });
 
-const Composer = memo(function Composer({
+export const Composer = memo(function Composer({
+  artifactTarget,
   activeName,
   running,
   disabled,
@@ -5295,11 +5440,12 @@ const Composer = memo(function Composer({
   onDismissError: () => void;
   sending: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
-  onAttachmentPick: (files: FileList | null) => void | Promise<void>;
+  onAttachmentPick: (files: FileList | null) => boolean;
   onRemoveAttachment: (attachment: PendingAttachment) => void;
-  onSend: (text: string, mentions?: ComposerMention[]) => Promise<void>;
+  onSend: (text: string, mentions: ComposerMention[], clientNonce: string) => Promise<boolean>;
   onStop: () => Promise<void>;
   onVoice?: () => void;
+  artifactTarget: ArtifactTarget;
   replyTarget?: ThreadMessage | null;
   replyQuote?: string | null;
   replyTargetName?: string;
@@ -5316,6 +5462,18 @@ const Composer = memo(function Composer({
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<AgentSkillCatalogEntry | null>(null);
   const [selectedMentions, setSelectedMentions] = useState<ComposerMention[]>([]);
+  const editRevision = useRef(0);
+  const retryNonce = useRef<string | null>(null);
+  const replyId = replyTarget?.id ?? null;
+  const quote = replyTarget ? (replyQuote ?? null) : null;
+  const previousReply = useRef({ id: replyId, quote });
+  useEffect(() => {
+    if (previousReply.current.id !== replyId || previousReply.current.quote !== quote) {
+      editRevision.current += 1;
+      retryNonce.current = null;
+      previousReply.current = { id: replyId, quote };
+    }
+  }, [replyId, quote]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const attachButtonRef = useRef<HTMLButtonElement>(null);
@@ -5427,7 +5585,18 @@ const Composer = memo(function Composer({
     return () => observer.disconnect();
   }, [draft]);
 
+  function markEdited() {
+    editRevision.current += 1;
+    retryNonce.current = null;
+  }
+
+  function pickAttachments(files: FileList | null) {
+    if (!files?.length) return;
+    if (onAttachmentPick(files)) markEdited();
+  }
+
   function updateDraft(value: string) {
+    markEdited();
     setDraft(value);
     const mentionMatch = /(?:^|\s)@([\w-]*)$/.exec(value);
     setMentionQuery(mentionMatch ? (mentionMatch[1] ?? "") : null);
@@ -5443,6 +5612,7 @@ const Composer = memo(function Composer({
   }
 
   function insertMention(mention: ComposerMention) {
+    markEdited();
     setDraft((current) => current.replace(/@([\w-]*)$/, ""));
     setMentionQuery(null);
     setMentionHighlightIndex(0);
@@ -5455,18 +5625,21 @@ const Composer = memo(function Composer({
   }
 
   function insertSkill(skill: AgentSkillCatalogEntry) {
+    markEdited();
     setSelectedSkill(skill);
     setDraft("");
     setSlashQuery(null);
   }
 
   function runSlashAction(action: SlashActionId) {
+    markEdited();
     setDraft("");
     setSlashQuery(null);
     onSlashAction?.(action);
   }
 
   function removeLastChip() {
+    markEdited();
     if (selectedMentions.length > 0) {
       setSelectedMentions((current) => current.slice(0, -1));
       return;
@@ -5521,8 +5694,11 @@ const Composer = memo(function Composer({
     mentionQuery === null &&
     (slashSkillOptions.length > 0 || slashActionOptions.length > 0);
 
-  function send() {
+  async function send() {
     if (!canSend || sending || disabled) return;
+    const revision = editRevision.current;
+    const clientNonce = retryNonce.current ?? newClientNonce();
+    retryNonce.current = null;
     const text = serializeComposerPrompt(draft, selectedSkill, selectedMentions);
     setDraft("");
     setMentionQuery(null);
@@ -5531,7 +5707,18 @@ const Composer = memo(function Composer({
     setSelectedSkill(null);
     const mentions = selectedMentions;
     setSelectedMentions([]);
-    void onSend(text, mentions);
+    try {
+      if ((await onSend(text, mentions, clientNonce)) !== false) return;
+    } catch {
+      // A rejected callback leaves acceptance unknown; do not restore a possible send.
+      return;
+    }
+    // Restore only an untouched draft, retaining its nonce for an unchanged retry.
+    if (editRevision.current !== revision) return;
+    retryNonce.current = clientNonce;
+    setDraft(draft);
+    setSelectedSkill(selectedSkill);
+    setSelectedMentions(mentions);
   }
 
   function handleDragEnter(event: DragEvent<HTMLFieldSetElement>) {
@@ -5577,7 +5764,7 @@ const Composer = memo(function Composer({
     event.preventDefault();
     dragDepth.current = 0;
     setDraggingFiles(false);
-    if (!disabled) void onAttachmentPick(dataTransfer.files);
+    if (!disabled) pickAttachments(dataTransfer.files);
   }
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -5585,7 +5772,7 @@ const Composer = memo(function Composer({
     // Only intercept real FileList pastes; leave text-only / empty-files native.
     if (disabled || !clipboardData || !isFilePaste(clipboardData)) return;
     event.preventDefault();
-    void onAttachmentPick(clipboardData.files);
+    pickAttachments(clipboardData.files);
     const text = clipboardData.getData("text/plain");
     if (!text) return;
     const textarea = event.currentTarget;
@@ -5732,34 +5919,20 @@ const Composer = memo(function Composer({
         </div>
       ) : null}
       {replyTarget ? (
-        <div
-          data-testid="reply-chip"
-          className="mb-2 flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-[13px] text-foreground/75"
-        >
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">
-            {replyQuote
-              ? t`Replying to ${replyName}: “${replyQuote}”`
-              : t`Replying to ${replyName}`}
-          </span>
-          <button
-            type="button"
-            aria-label={t`Cancel reply`}
-            onClick={() => {
-              replyAnnouncementKind.current = "cancelled";
-              // Kill a pending arm announce in this event — the effect's
-              // cleanup can lag the timer, and a late "Replying to" would
-              // then be cleared as stale, dropping the cancel announcement.
-              window.clearTimeout(announceTimer.current);
-              onClearReply?.();
-              setReplyAnnouncement(t`Reply cancelled`);
-              // The chip unmounts with this button — keep focus in the composer.
-              textareaRef.current?.focus();
-            }}
-            className="shrink-0 text-muted-foreground hover:text-foreground"
-          >
-            <X size={13} strokeWidth={2} />
-          </button>
-        </div>
+        <ComposerReplyPreview
+          author={replyName}
+          text={previewMessageText(replyTarget)}
+          quote={replyQuote}
+          attachment={replyAttachment(replyTarget.blocks)}
+          target={artifactTarget}
+          onDismiss={() => {
+            replyAnnouncementKind.current = "cancelled";
+            window.clearTimeout(announceTimer.current);
+            onClearReply?.();
+            setReplyAnnouncement(t`Reply cancelled`);
+            textareaRef.current?.focus();
+          }}
+        />
       ) : null}
       {attachmentNotice ? (
         <div className="mb-3 rounded-[14px] border border-warning/40 bg-warning/10 px-4 py-2 text-[13px] text-warning">
@@ -5788,7 +5961,10 @@ const Composer = memo(function Composer({
               <button
                 type="button"
                 aria-label={t`Remove ${attachment.file.name}`}
-                onClick={() => onRemoveAttachment(attachment)}
+                onClick={() => {
+                  markEdited();
+                  onRemoveAttachment(attachment);
+                }}
                 className="text-muted-foreground hover:text-foreground"
               >
                 <X size={13} strokeWidth={2} />
@@ -5895,7 +6071,7 @@ const Composer = memo(function Composer({
           multiple
           accept={ATTACHMENT_ACCEPT}
           className="hidden"
-          onChange={(event) => void onAttachmentPick(event.target.files)}
+          onChange={(event) => pickAttachments(event.target.files)}
         />
         <Button
           ref={attachButtonRef}
@@ -5928,7 +6104,10 @@ const Composer = memo(function Composer({
               <button
                 type="button"
                 aria-label={t`Remove skill ${selectedSkill.name}`}
-                onClick={() => setSelectedSkill(null)}
+                onClick={() => {
+                  markEdited();
+                  setSelectedSkill(null);
+                }}
                 className="text-muted-foreground hover:text-foreground"
               >
                 <X size={12} strokeWidth={2} />
@@ -5949,13 +6128,14 @@ const Composer = memo(function Composer({
               <button
                 type="button"
                 aria-label={t`Remove mention ${mention.name}`}
-                onClick={() =>
+                onClick={() => {
+                  markEdited();
                   setSelectedMentions((current) =>
                     current.filter(
                       (selected) => mentionChipKey(selected) !== mentionChipKey(mention),
                     ),
-                  )
-                }
+                  );
+                }}
                 className="text-muted-foreground hover:text-foreground"
               >
                 <X size={12} strokeWidth={2} />
@@ -6004,7 +6184,7 @@ const Composer = memo(function Composer({
               }
               if (action.type === "send") {
                 event.preventDefault();
-                send();
+                void send();
               }
             }}
             disabled={disabled}
@@ -6185,19 +6365,9 @@ function previewMessageText(message: ThreadMessage): string {
     .join(" ")
     .trim();
   if (text) return text;
-  if (message.blocks.some((block) => block.kind === "image" || block.kind === "file")) {
-    return t`Attachment`;
-  }
+  const attachment = replyAttachment(message.blocks);
+  if (attachment) return attachment.kind === "image" ? t`Photo` : attachment.name || t`Attachment`;
   return t`Message`;
-}
-
-/** Bound reply excerpts used in accessible names (visible UI truncates via CSS). */
-function accessibleReplyExcerpt(text: string, max = 120): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= max) return normalized;
-  // Reserve a slot for the ellipsis; never split a surrogate pair at the cut.
-  const end = (normalized.charCodeAt(max - 2) & 0xfc00) === 0xd800 ? max - 2 : max - 1;
-  return `${normalized.slice(0, end).trimEnd()}…`;
 }
 
 function formatRosterTime(isoDate?: string | null): string {
@@ -6316,6 +6486,15 @@ function MessageHoverActions({
             <MoreHorizontal size={15} strokeWidth={1.7} />
           </DropdownMenuTrigger>
           <DropdownMenuContent align={side === "end" ? "start" : "end"}>
+            <DropdownMenuItem
+              onClick={() => {
+                setMoreOpen(false);
+                onReply(message);
+              }}
+            >
+              <Reply size={14} strokeWidth={1.7} />
+              <Trans>Reply</Trans>
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={copyMessage}>
               <Copy size={14} strokeWidth={1.7} />
               <Trans>Copy</Trans>
@@ -6364,7 +6543,7 @@ function ComputerReleaseActions({
   if (!takeoverRequested) {
     return (
       <Button type="button" variant="outline" size="sm" onClick={() => void onRelease()}>
-        <Trans>Release</Trans>
+        <Trans>Release control</Trans>
       </Button>
     );
   }
@@ -6390,8 +6569,7 @@ const MessageView = memo(function MessageView({
   speakerName,
   memberName,
   peerBot,
-  replyPreview,
-  replyToMessageId,
+  replyParent,
   onJumpToMessage,
   onRefresh,
   onBotChanged,
@@ -6410,9 +6588,8 @@ const MessageView = memo(function MessageView({
   onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
   speakerName?: string;
   memberName?: (botId: string | undefined) => string | undefined;
-  peerBot: (botId: string) => { color: string; status?: string } | undefined;
-  replyPreview?: ThreadMessage;
-  replyToMessageId?: string;
+  peerBot: (botId: string) => { name?: string; color: string; status?: string } | undefined;
+  replyParent?: ThreadMessage;
   onJumpToMessage?: (messageId: string) => void;
   onRefresh: () => Promise<void>;
   onBotChanged: () => Promise<void>;
@@ -6433,7 +6610,8 @@ const MessageView = memo(function MessageView({
   const isLive = message.id.startsWith("progress:");
   const quoteMessageId = message.id.includes(":") ? undefined : message.id;
   const visibleNarrationBlocks = renderableMessageBlocks(message.blocks, showToolActivity);
-  const parentJumpId = replyPreview?.id ?? replyToMessageId;
+
+  const replyBotId = message.replyPreview?.botId ?? replyParent?.botId;
   const speakerBot = message.botId ? peerBot?.(message.botId) : undefined;
   const speakerColorDef = useMemo(
     () => resolvePersonaColorDef(message.botId ?? "bot", speakerBot?.color),
@@ -6455,30 +6633,19 @@ const MessageView = memo(function MessageView({
           {speakerName}
         </div>
       ) : null}
-      {parentJumpId ? (
-        <button
-          type="button"
-          data-testid="reply-parent-preview"
-          // Name the action and a short excerpt; a bare action label would
-          // hide the quote, and an unbounded quote can be thousands of chars.
-          aria-label={
-            message.replyQuote
-              ? t`Jump to replied message: “${accessibleReplyExcerpt(message.replyQuote)}”`
-              : replyPreview
-                ? t`Jump to replied message: ${accessibleReplyExcerpt(previewMessageText(replyPreview))}`
-                : t`Jump to replied message`
-          }
-          onClick={() => onJumpToMessage?.(parentJumpId)}
-          className="mb-2 block max-w-[74%] truncate rounded-[14px] border border-border bg-background px-3 py-2 text-start text-[12.5px] text-muted-foreground hover:border-border hover:text-foreground/75"
-          dir="auto"
-        >
-          {message.replyQuote
-            ? `“${message.replyQuote}”`
-            : replyPreview
-              ? previewMessageText(replyPreview)
-              : t`Earlier message`}
-        </button>
-      ) : null}
+      <ReplyLine
+        target={artifactTarget}
+        message={message}
+        fallbackText={replyParent ? previewMessageText(replyParent) : undefined}
+        author={
+          (message.replyPreview?.role ?? replyParent?.role) === "user"
+            ? t`You`
+            : ((replyBotId ? peerBot(replyBotId)?.name : undefined) ??
+              memberName?.(replyBotId) ??
+              t`Bot`)
+        }
+        onJump={onJumpToMessage}
+      />
     </>
   );
   if (isNarration) {

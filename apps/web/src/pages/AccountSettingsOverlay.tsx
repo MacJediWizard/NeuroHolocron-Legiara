@@ -3,7 +3,7 @@ import type { AccountSecurity, AvatarStyle } from "@rakazo/contracts";
 import { BotAvatar, Button, Field, FieldLabel, Input, Label, Switch, Toggle } from "@rakazo/ui-web";
 import { ChevronDown } from "lucide-react";
 import type { KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import { AccountAccess } from "../components/AccountAccess";
 import { ApprovalRulesSettings } from "../components/ApprovalRulesSettings";
@@ -12,6 +12,11 @@ import { ComputersUnavailableHint } from "../components/ComputersUnavailableHint
 import { DesktopUpdateSection } from "../components/DesktopUpdates";
 import { SoftwareUpdateSection } from "../components/SoftwareUpdateSection";
 import { authClient } from "../lib/auth";
+import {
+  getBotsSidebarDensity,
+  setBotsSidebarDensity,
+  subscribeBotsSidebarDensity,
+} from "../lib/bots-sidebar-density-pref";
 import { getActiveUiLocale, setUiLocale } from "../lib/i18n";
 import {
   getRemoteImagesPreference,
@@ -57,6 +62,12 @@ export function GeneralSettingsPanels({
   const [appearance, setAppearance] = useState<AppearancePreference>(() =>
     getUiAppearancePreference(),
   );
+  const sidebarDensity = useSyncExternalStore(
+    subscribeBotsSidebarDensity,
+    getBotsSidebarDensity,
+    () => "comfortable",
+  );
+  const sidebarDensityLabelId = useId();
   const [streamReplies, setStreamReplies] = useState(
     () => getResponseStreamingPreference() === "on",
   );
@@ -135,6 +146,33 @@ export function GeneralSettingsPanels({
             setUiAppearance(next);
           }}
         />
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <span id={sidebarDensityLabelId} className="text-[13px] text-foreground/75">
+            <Trans>Sidebar density</Trans>
+          </span>
+          <fieldset
+            aria-labelledby={sidebarDensityLabelId}
+            data-testid="bots-sidebar-density-select"
+            className="grid min-w-0 grid-cols-2 gap-1 rounded-lg bg-muted p-1"
+          >
+            <Toggle
+              data-testid="bots-sidebar-density-comfortable"
+              pressed={sidebarDensity === "comfortable"}
+              onPressedChange={() => setBotsSidebarDensity("comfortable")}
+              className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
+            >
+              <Trans>Comfortable</Trans>
+            </Toggle>
+            <Toggle
+              data-testid="bots-sidebar-density-compact"
+              pressed={sidebarDensity === "compact"}
+              onPressedChange={() => setBotsSidebarDensity("compact")}
+              className="text-[13px] aria-pressed:bg-background aria-pressed:shadow-sm"
+            >
+              <Trans>Compact</Trans>
+            </Toggle>
+          </fieldset>
+        </div>
       </section>
 
       <section className="rounded-xl border border-border px-4 py-4">
@@ -257,7 +295,12 @@ export function UsageSettingsPanel({
   usage,
   panelRef,
 }: {
-  usage?: { runs: number; inputTokens: number; outputTokens: number } | null;
+  usage?: {
+    runs: number;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    totalTokens?: number | null;
+  } | null;
   panelRef?: RefObject<HTMLDivElement | null>;
 }) {
   return (
@@ -273,7 +316,7 @@ export function UsageSettingsPanel({
       {usage ? (
         <p className="mt-3 text-[14px] text-foreground/75">
           <Trans>
-            {usage.runs} runs · {usage.inputTokens + usage.outputTokens} tokens
+            {usage.runs} runs · {usage.totalTokens ?? "—"} tokens
           </Trans>
         </p>
       ) : null}

@@ -46,6 +46,8 @@ model User {
   createdSpaces               Space[]                      @relation("SpaceCreator")
   botSecrets BotSecret[]
   agentSecrets               AgentSecret[]
+  createdTickets              Ticket[]                     @relation("TicketCreatorUser")
+  ticketComments              TicketComment[]              @relation("TicketCommentAuthorUser")
 
   @@unique([email])
   @@map("user")
@@ -239,6 +241,9 @@ model Space {
   botSecrets BotSecret[]
   externalConversations       ExternalConversation[]
   agentSecrets                AgentSecret[]
+  board                       Board?
+  tickets                     Ticket[]
+  ticketComments              TicketComment[]
 
   @@unique([id, organizationId])
   @@index([organizationId, createdAt])
@@ -258,6 +263,7 @@ model SpaceMember {
   modelPreferences SpaceModelPreference[]
   voicePreferences SpaceVoicePreference[]
   aiDataConsents AiDataConsent[]
+  backupModels SpaceBackupModel[]
 
   @@unique([spaceId, userId])
   @@index([organizationId, userId])
@@ -350,6 +356,19 @@ model SpaceModelPreference {
   @@map("space_model_preferences")
 }
 
+model SpaceBackupModel {
+  spaceId     String
+  userId      String
+  spaceMember SpaceMember @relation(fields: [spaceId, userId], references: [spaceId, userId], onDelete: Cascade)
+  provider    String
+  modelId     String
+  position    Int
+
+  @@id([spaceId, userId, position])
+  @@unique([spaceId, userId, provider, modelId])
+  @@map("space_backup_models")
+}
+
 model SpaceVoicePreference {
   id           String              @id @default(cuid())
   spaceId      String
@@ -404,6 +423,7 @@ model Bot {
   modelProvider     String?
   modelId           String?
   thinkingLevel     String?
+  disabledBuiltinTools String[] @default([])
   webhookSecretId   String?
   teamChatAmbientEnabled Boolean @default(false)
   teamChatRules          String  @default("")
@@ -420,6 +440,9 @@ model Bot {
   mcpServers        BotMcpServer[]
   groupMembers      ChatGroupMember[]
   botSecrets BotSecret[]
+  assignedTickets   Ticket[]          @relation("TicketAssigneeBot")
+  createdTickets    Ticket[]          @relation("TicketCreatorBot")
+  ticketComments    TicketComment[]   @relation("TicketCommentAuthorBot")
 
   externalConversations ExternalConversation[]
 
@@ -607,6 +630,10 @@ model Run {
   trigger              String
   modelProvider        String?
   modelId              String?
+  thinkingLevel        String?
+  // True when these columns are the model the run must keep. A later attempt
+  // may record the model it used in the same columns without setting this.
+  modelPinned          Boolean          @default(false)
   error                String?
   leaseOwner           String?
   leaseFence           Int              @default(0)
@@ -654,6 +681,10 @@ model SteeringMessage {
   run       Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
   /// Set when a pending row must resume as this trigger so its reply can be delivered.
   originTrigger String?
+  /// Model agreed for an inbound delivery that had to wait. Empty follows the bot.
+  modelProvider String?
+  modelId       String?
+  thinkingLevel String?
   claimedAt DateTime?
   createdAt DateTime @default(now())
 
@@ -754,6 +785,9 @@ model Routine {
   webhookEnabled Boolean   @default(false)
   githubEnabled  Boolean   @default(false)
   messageProvider String?
+  modelProvider  String?
+  modelId        String?
+  thinkingLevel  String?
   lastRunAt      DateTime?
   nextRunAt      DateTime?
   createdAt      DateTime  @default(now())
@@ -1019,7 +1053,10 @@ model Artifact {
   rootArtifact   Artifact?  @relation("ArtifactVersions", fields: [rootArtifactId], references: [id], onDelete: Cascade)
   versions       Artifact[] @relation("ArtifactVersions")
   version        Int        @default(1)
+  // Client-chosen per upload so a retried upload that already landed returns this row.
+  clientNonce    String?
 
+  @@unique([spaceId, userId, clientNonce])
   @@index([spaceId, botId])
   @@index([groupId])
   @@index([rootArtifactId])
@@ -1045,11 +1082,25 @@ model UsageRecord {
   run              Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
   provider         String
   model            String
-  inputTokens      Int
-  outputTokens     Int
-  cacheReadTokens  Int      @default(0)
-  cacheWriteTokens Int      @default(0)
-  createdAt        DateTime @default(now())
+  /// Uncached input; cache buckets are additional, reasoning is a subset of output.
+  inputTokens       Int?
+  outputTokens      Int?
+  cacheReadTokens   Int?
+  cacheWriteTokens  Int?
+  cacheWrite1hTokens Int?
+  reasoningTokens   Int?
+  totalTokens       Int?
+  costUsd           Float?
+  costSource        String?
+  pricingVersion    String?
+  usageSource       String?
+  callId            String? @unique
+  operationId       String?
+  operationKind     String  @default("answer")
+  /// Durable attribution, deliberately without lifecycle foreign keys.
+  parentRunId       String?
+  agentId           String?
+  createdAt         DateTime @default(now())
 
   @@index([spaceId, userId, createdAt])
   @@map("usage_records")
@@ -1368,4 +1419,64 @@ model IntegrationProviderConfig {
   updatedAt  DateTime @updatedAt
 
   @@map("integration_provider_configs")
+}
+
+model Board {
+  id           String   @id @default(cuid())
+  spaceId      String   @unique
+  space        Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  name         String   @default("Board")
+  ticketPrefix String   @default("RAK")
+  nextNumber   Int      @default(1)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tickets      Ticket[]
+
+  @@map("boards")
+}
+
+model Ticket {
+  id              String    @id @default(cuid())
+  boardId         String
+  board           Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  spaceId         String
+  space           Space     @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  number          Int
+  title           String
+  description     String?
+  status          String    @default("todo")
+  priority        String?
+  assigneeBotId   String?
+  assigneeBot     Bot?      @relation("TicketAssigneeBot", fields: [assigneeBotId], references: [id], onDelete: SetNull)
+  createdByBotId  String?
+  createdByBot    Bot?      @relation("TicketCreatorBot", fields: [createdByBotId], references: [id], onDelete: SetNull)
+  createdByUserId String?
+  createdByUser   User?     @relation("TicketCreatorUser", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  completedAt       DateTime?
+  comments        TicketComment[]
+
+  @@unique([boardId, number])
+  @@index([spaceId, status])
+  @@index([boardId, status])
+  @@map("tickets")
+}
+
+model TicketComment {
+  id           String   @id @default(cuid())
+  ticketId     String
+  ticket       Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  spaceId      String
+  space        Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  authorBotId  String?
+  authorBot    Bot?     @relation("TicketCommentAuthorBot", fields: [authorBotId], references: [id], onDelete: SetNull)
+  authorUserId String?
+  authorUser   User?    @relation("TicketCommentAuthorUser", fields: [authorUserId], references: [id], onDelete: SetNull)
+  body         String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([ticketId, createdAt])
+  @@map("ticket_comments")
 }

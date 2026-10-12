@@ -1,9 +1,11 @@
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
 import {
+  isBackgroundRun,
   isPeerRun,
   loadAllMessages,
   loadMessagePage,
+  shouldForwardBackgroundThreadEvent,
   shouldForwardPeerThreadEvent,
 } from "./thread-message-pages.js";
 
@@ -41,6 +43,97 @@ describe("thread message pages", () => {
         payload: {},
       }),
     ).toBe(false);
+  });
+
+  it("caches background-run classification for live events", async () => {
+    const findUnique = vi.fn(async () => ({ trigger: "tickets" }));
+    const prisma = { run: { findUnique } } as unknown as PrismaClient;
+    const cache = new Map<string, Promise<boolean>>();
+
+    await expect(isBackgroundRun(prisma, "run-ticket", cache)).resolves.toBe(true);
+    await expect(isBackgroundRun(prisma, "run-ticket", cache)).resolves.toBe(true);
+    expect(findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards only explicit user contact from a background run", () => {
+    expect(
+      shouldForwardBackgroundThreadEvent({
+        type: "thread.message.created",
+        payload: { blocks: [{ kind: "text", text: "Working" }] },
+      }),
+    ).toBe(false);
+    expect(
+      shouldForwardBackgroundThreadEvent({
+        type: "thread.message.created",
+        payload: { blocks: [{ kind: "ask", text: "Pick one" }] },
+      }),
+    ).toBe(true);
+    expect(
+      shouldForwardBackgroundThreadEvent({
+        type: "thread.message.created",
+        payload: { blocks: [{ kind: "computer", text: "Needs you" }] },
+      }),
+    ).toBe(true);
+    for (const type of ["thread.message.created", "thread.message.updated"]) {
+      expect(
+        shouldForwardBackgroundThreadEvent({
+          type,
+          payload: { blocks: [{ kind: "mcp_approval" }] },
+        }),
+      ).toBe(true);
+    }
+    expect(shouldForwardBackgroundThreadEvent({ type: "run.started", payload: {} })).toBe(false);
+    expect(shouldForwardBackgroundThreadEvent({ type: "run.waiting_input", payload: {} })).toBe(
+      true,
+    );
+    expect(
+      shouldForwardBackgroundThreadEvent({ type: "computer.takeover.requested", payload: {} }),
+    ).toBe(true);
+    expect(shouldForwardBackgroundThreadEvent({ type: "run.completed", payload: {} })).toBe(true);
+    expect(shouldForwardBackgroundThreadEvent({ type: "run.failed", payload: {} })).toBe(true);
+    expect(shouldForwardBackgroundThreadEvent({ type: "run.cancelled", payload: {} })).toBe(true);
+    expect(shouldForwardBackgroundThreadEvent({ type: "thread.progress", payload: {} })).toBe(
+      false,
+    );
+  });
+
+  it("hides ticket-run output from the transcript but keeps user-input cards", async () => {
+    const rows = [
+      {
+        id: "message-computer",
+        blocks: [{ kind: "computer", state: "Needs you", text: "Sign in" }],
+      },
+      { id: "message-approval", blocks: [{ kind: "mcp_approval" }] },
+      { id: "message-final", blocks: [{ kind: "text", text: "Closed the ticket." }] },
+      {
+        id: "message-steps",
+        blocks: [{ kind: "steps", steps: [{ label: "Ticket comment", count: 1 }] }],
+      },
+      { id: "message-user", blocks: [{ kind: "text", text: "Visible answer" }] },
+    ].map((row, index) => ({
+      ...row,
+      threadId: "thread-1",
+      seq: 4 - index,
+      role: "bot",
+      botId: "bot-1",
+      replyToMessageId: null,
+      runId: row.id === "message-user" ? "run-user" : "run-ticket",
+      clientNonce: null,
+      createdAt: new Date("2026-08-16T00:00:01.000Z"),
+    }));
+    const findMany = vi.fn(async () => rows);
+    const prisma = {
+      message: { findMany },
+      run: { findMany: vi.fn(async () => [{ id: "run-ticket", trigger: "tickets" }]) },
+    } as unknown as PrismaClient;
+
+    const page = await loadMessagePage(prisma, "thread-1", undefined, 6);
+
+    expect(page.messages.map((message) => message.id)).toEqual([
+      "message-user",
+      "message-approval",
+      "message-computer",
+    ]);
   });
 
   it("keeps peer receipt rows when filtering peer-run output from pages", async () => {
@@ -452,10 +545,13 @@ describe("thread message pages", () => {
     const page = await loadMessagePage(prisma, "thread-1", 6, 2);
 
     expect(findMany).toHaveBeenCalledWith({
+      include: {
+        author: { select: { id: true, name: true } },
+        replyTo: { select: { threadId: true, role: true, botId: true, blocks: true } },
+      },
       where: { threadId: "thread-1", seq: { lt: 6 } },
       orderBy: { seq: "desc" },
       take: 3,
-      include: { author: { select: { id: true, name: true } } },
     });
     expect(page.messages.map((message) => message.seq)).toEqual([4, 5]);
     expect(page.olderCursor).toBe(4);
@@ -557,10 +653,13 @@ describe("thread message pages", () => {
     expect(page.olderCursor).toBe(3);
     expect(page.coveredThroughSeq).toBe(7);
     expect(findMany).toHaveBeenCalledWith({
+      include: {
+        author: { select: { id: true, name: true } },
+        replyTo: { select: { threadId: true, role: true, botId: true, blocks: true } },
+      },
       where: { threadId: "thread-1", seq: { gte: 3, lte: 7 } },
       orderBy: { seq: "asc" },
       take: 4,
-      include: { author: { select: { id: true, name: true } } },
     });
   });
 
@@ -622,4 +721,164 @@ describe("thread message pages", () => {
 
     expect(page.messages.map((message) => message.callId)).toEqual([undefined, "call-1"]);
   });
+});
+
+describe("authoritative reply previews", () => {
+  it("serializes a parent outside the loaded page and marks deleted parents unavailable", async () => {
+    const base = {
+      threadId: "thread-1",
+      role: "user",
+      botId: null,
+      runId: null,
+      createdAt: new Date(),
+      blocks: [{ kind: "text", text: "My reply" }],
+    };
+    const parent = {
+      threadId: "thread-1",
+      role: "bot",
+      botId: "bot-1",
+      blocks: [{ kind: "text", text: "**First** line\n\nSecond line" }],
+    };
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        ...base,
+        id: "reply-2",
+        seq: 2,
+        replyToMessageId: null,
+        replyQuote: "First line",
+        replyTo: null,
+      },
+      {
+        ...base,
+        id: "reply-1",
+        seq: 1,
+        replyToMessageId: "older-parent",
+        replyQuote: null,
+        replyTo: parent,
+      },
+    ]);
+    const page = await loadMessagePage(
+      { message: { findMany } } as unknown as PrismaClient,
+      "thread-1",
+      undefined,
+      100,
+    );
+    expect(page.messages[0]?.replyPreview).toEqual({
+      role: "bot",
+      botId: "bot-1",
+      text: "First line",
+    });
+    expect(page.messages[1]?.replyPreview).toBeNull();
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { threadId: "thread-1" },
+        include: {
+          author: { select: { id: true, name: true } },
+          replyTo: { select: { threadId: true, role: true, botId: true, blocks: true } },
+        },
+      }),
+    );
+  });
+  it("does not expose a parent from another thread", async () => {
+    const row = {
+      id: "reply",
+      threadId: "thread-1",
+      seq: 1,
+      role: "user",
+      blocks: [],
+      botId: null,
+      runId: null,
+      createdAt: new Date(),
+      replyToMessageId: "foreign",
+      replyQuote: null,
+      replyTo: {
+        threadId: "other",
+        role: "bot",
+        botId: "other-bot",
+        blocks: [{ kind: "text", text: "Private text" }],
+      },
+    };
+    const page = await loadMessagePage(
+      { message: { findMany: vi.fn().mockResolvedValue([row]) } } as unknown as PrismaClient,
+      "thread-1",
+      undefined,
+      100,
+    );
+    expect(page.messages[0]?.replyPreview).toBeNull();
+    expect(JSON.stringify(page)).not.toContain("Private text");
+  });
+});
+
+describe("reply target validation", () => {
+  it.each([
+    ["malformed text", [{ kind: "text", text: 12 }], null],
+    ["null block", [null], null],
+    ["non-array", {}, null],
+    ["ask", [{ kind: "ask", text: "Which release?" }], "Which release?"],
+    [
+      "channel message",
+      [
+        {
+          kind: "channel_message",
+          provider: "test",
+          channelId: "channel",
+          fromAddress: "sender",
+          fromLabel: "Sender",
+          text: "Release notes",
+        },
+      ],
+      "Release notes",
+    ],
+    [
+      "chart",
+      [{ kind: "chart", name: "Release adoption", spec: {}, data: [] }],
+      "Release adoption",
+    ],
+  ])("serializes an outside-page %s target safely", async (_kind, blocks, text) => {
+    const row = {
+      id: "reply",
+      threadId: "thread-1",
+      seq: 100,
+      role: "user",
+      blocks: [{ kind: "text", text: "Follow up" }],
+      botId: null,
+      runId: null,
+      createdAt: new Date("2026-10-08T12:00:00Z"),
+      replyToMessageId: "older-parent",
+      replyQuote: null,
+      replyTo: { id: "older-parent", threadId: "thread-1", role: "bot", botId: "bot-1", blocks },
+    };
+    const prisma = {
+      message: { findMany: vi.fn().mockResolvedValue([row]), count: vi.fn().mockResolvedValue(0) },
+    } as unknown as PrismaClient;
+    for (const around of [undefined, { seq: 100 }]) {
+      const page = await loadMessagePage(prisma, "thread-1", undefined, 1, around);
+      expect(page.messages.map((message) => message.id)).toEqual(["reply"]);
+      expect(page.messages[0]?.replyPreview).toEqual(
+        text === null ? null : { role: "bot", botId: "bot-1", text },
+      );
+    }
+  });
+});
+
+it("derives attachment metadata from a validated parent outside the loaded page", async () => {
+  const image = { kind: "image", artifactId: "parent-photo", name: "", mimeType: "image/png" };
+  const row = {
+    id: "reply",
+    threadId: "thread",
+    seq: 100,
+    role: "user",
+    blocks: [],
+    botId: null,
+    runId: null,
+    createdAt: new Date(),
+    replyToMessageId: "parent",
+    replyQuote: null,
+    replyTo: { threadId: "thread", role: "user", botId: null, blocks: [image] },
+  };
+  const prisma = {
+    message: { findMany: vi.fn().mockResolvedValue([row]), count: vi.fn().mockResolvedValue(0) },
+  } as unknown as PrismaClient;
+  const page = await loadMessagePage(prisma, "thread", undefined, 1);
+  expect(page.messages[0]?.replyPreview).toEqual({ role: "user", text: "", attachment: image });
 });

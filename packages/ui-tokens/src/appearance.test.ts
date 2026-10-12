@@ -46,9 +46,18 @@ describe("appearance preference", () => {
     expect(tokensForAppearance("dark")).toBe(darkTokens);
     expect(tokensForAppearance("light")).toBe(lightTokens);
     for (const key of Object.keys(darkTokens) as (keyof ColorTokens)[]) {
-      if (key === "destructiveForeground") continue;
+      if (key === "destructiveForeground" || key === "faviconPlate") continue;
       expect(darkTokens[key], key).not.toBe(lightTokens[key]);
     }
+  });
+
+  it("keeps working-state blue in its own semantic token across themes", () => {
+    expect(darkTokens.statusWorking).toBeTruthy();
+    expect(lightTokens.statusWorking).toBeTruthy();
+    expect(darkTokens.statusWorking).toBe(darkTokens.link);
+    expect(lightTokens.statusWorking).toBe(lightTokens.link);
+    expect(darkTokens.statusWorking).not.toBe(darkTokens.primary);
+    expect(lightTokens.statusWorking).not.toBe(lightTokens.primary);
   });
 
   it("keeps user message surfaces muted, not cream invert", () => {

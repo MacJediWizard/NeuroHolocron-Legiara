@@ -122,6 +122,29 @@ describe("BotAvatar", () => {
     expect(html).not.toContain("grok-character-eyes");
   });
 
+  it("keeps a working photo ring outside the clipped image and uses the status token", () => {
+    const html = renderToString(
+      <BotAvatar color="data:image/png;base64,abc" identity="maya" size={32} status="running" />,
+    );
+    expect(html).toContain('class="rakazo-bot-avatar relative shrink-0 select-none"');
+    expect(html).toContain("rakazo-bot-avatar-picture");
+    expect(html).toContain("rakazo-bot-avatar-ring-working");
+    expect(html).toContain("stroke-status-working");
+    expect(html).toContain('data-working="true"');
+    expect(html.indexOf("rakazo-bot-avatar-picture")).toBeLessThan(
+      html.indexOf("rakazo-bot-avatar-ring"),
+    );
+  });
+
+  it("keeps idle photo avatars ring-free", () => {
+    const html = renderToString(
+      <BotAvatar color="data:image/png;base64,abc" identity="maya" size={32} status="idle" />,
+    );
+    expect(html).toContain("rakazo-bot-avatar-picture");
+    expect(html).toContain('data-working="false"');
+    expect(html).not.toContain("rakazo-bot-avatar-ring");
+  });
+
   it("does not treat arbitrary http(s) color values as remote images", () => {
     const parsed = parseBotAvatar("https://evil.example/track.png");
     expect(parsed.isImage).toBe(false);

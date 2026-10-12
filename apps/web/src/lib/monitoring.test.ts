@@ -12,6 +12,36 @@ function respond(body: unknown, status = 200) {
 }
 
 describe("browser monitoring", () => {
+  it("reports errors caught before startup finishes once the SDK starts", async () => {
+    vi.resetModules();
+    const fresh = await import("./monitoring");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const early = new Error("first render");
+    fresh.reportCaughtReactError(early, { componentStack: "\n    at App" });
+    expect(sentry.captureReactException).not.toHaveBeenCalled();
+
+    expect(await fresh.startMonitoring(respond({ dsn: "https://key@errors.example.com/8" }))).toBe(
+      true,
+    );
+    expect(sentry.captureReactException).toHaveBeenCalledWith(early, {
+      componentStack: "\n    at App",
+    });
+    consoleError.mockRestore();
+  });
+
+  it("drops queued errors when monitoring is off", async () => {
+    vi.resetModules();
+    const fresh = await import("./monitoring");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    fresh.reportCaughtReactError(new Error("early"), { componentStack: "" });
+    expect(await fresh.startMonitoring(respond({ dsn: null }))).toBe(false);
+    expect(await fresh.startMonitoring(respond({ dsn: "https://key@errors.example.com/8" }))).toBe(
+      true,
+    );
+    expect(sentry.captureReactException).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
   beforeEach(() => {
     sentry.init.mockReset();
     sentry.captureReactException.mockReset();
@@ -40,7 +70,7 @@ describe("browser monitoring", () => {
   it("starts the SDK through the API tunnel with data collection off", async () => {
     const fetchImpl = respond({
       dsn: "https://key@errors.example.com/8",
-      environment: "lg-acme",
+      environment: "prod-acme",
       release: "abc",
       tunnel: "/api/monitoring/tunnel",
     });
@@ -49,7 +79,7 @@ describe("browser monitoring", () => {
     const options = sentry.init.mock.calls[0]![0];
     expect(options).toMatchObject({
       dsn: "https://key@errors.example.com/8",
-      environment: "lg-acme",
+      environment: "prod-acme",
       release: "abc",
       tunnel: "/api/monitoring/tunnel",
       dataCollection: { userInfo: false, cookies: false, httpHeaders: false },

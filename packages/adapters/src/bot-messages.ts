@@ -51,11 +51,14 @@ export async function loadBotMessageContext(
   const replyBlocks = Array.isArray(source?.replyTo?.blocks)
     ? (source.replyTo.blocks as MessageBlock[])
     : [];
-  const repliesToRequest = replyBlocks.some(
-    (block) =>
-      block.kind === "bot_message_sent" &&
-      (block.intent === undefined || block.intent === "request" || block.intent === "question"),
-  );
+  const repliesToRequest =
+    (context.intent === "result" || context.intent === "status" || context.intent === "fyi") &&
+    replyBlocks.some(
+      (block) =>
+        block.kind === "bot_message_sent" &&
+        block.toBotId === context.fromBotId &&
+        (block.intent === undefined || block.intent === "request" || block.intent === "question"),
+    );
   return { ...context, repliesToRequest };
 }
 
@@ -88,7 +91,7 @@ export async function messageBot(
      */
     attach?: () => Promise<PreparedBotMessageAttachments>;
   },
-  options?: { allowTerminalSource?: boolean },
+  options?: { allowTerminalSource?: boolean; forceUnread?: boolean },
 ) {
   const message = String(input.message ?? "").trim();
   if (!message) return { ok: false as const, error: "message is required" };
@@ -228,6 +231,7 @@ export async function messageBot(
           blocks: [outboundBlock, ...attachments],
           botId: run.botId,
           runId: run.id,
+          markUnread: options?.forceUnread === true,
           allowCancelledRun: options?.allowTerminalSource === true,
         });
         const inboundBlock: MessageBlock = {
@@ -239,7 +243,6 @@ export async function messageBot(
           intent,
           returnToMessageId: outbound.id,
         };
-        // This is the recipient's prompt, but it is still unread peer activity.
         const inbound = await createThreadMessageInTransaction(tx, {
           threadId: targetThreadId,
           role: "user",
@@ -249,7 +252,7 @@ export async function messageBot(
               ? sourceContext.returnToMessageId
               : undefined,
           clientNonce: deliveryKey,
-          markUnread: true,
+          markUnread: options?.forceUnread === true,
         });
         const task = await tx.task.create({
           data: {
@@ -353,6 +356,7 @@ export async function returnBotMessageOutcome(
   sender: { id: string; name: string },
   text: string,
   intent: "result" | "status" = "result",
+  options?: { forceUnread?: boolean },
 ) {
   const source = await loadBotMessageContext(deps.prisma, run.sourceMessageId);
   if (!source) {
@@ -394,7 +398,10 @@ export async function returnBotMessageOutcome(
       // One key per run so status vs result (executor vs reconciler) cannot double-deliver.
       deliveryKey: `auto-outcome:${run.id}`,
     },
-    { allowTerminalSource: true },
+    {
+      allowTerminalSource: true,
+      forceUnread: options?.forceUnread,
+    },
   );
   if (outcome.ok) await markBotOutcomeReturned(deps.prisma, run.id);
   return outcome.ok;

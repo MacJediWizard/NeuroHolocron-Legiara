@@ -34,45 +34,74 @@ export async function aiConsentStatus(
     : undefined;
   // Models and voices run on the owner's credentials; consent stays per member.
   const ownerId = await spaceOwnerUserId(deps.prisma, actor.spaceId);
-  const [preferences, defaultCredential, bots, voices, memory, settings, consents] =
-    await Promise.all([
-      modelsEnabled
-        ? deps.prisma.spaceModelPreference.findMany({
+  const [
+    preferences,
+    backups,
+    defaultCredential,
+    bots,
+    routines,
+    voices,
+    memory,
+    settings,
+    consents,
+  ] = await Promise.all([
+    modelsEnabled
+      ? deps.prisma.spaceModelPreference.findMany({
+          where: { userId: ownerId, spaceId: actor.spaceId },
+          include: { credential: true },
+        })
+      : [],
+    modelsEnabled
+      ? deps.prisma.spaceBackupModel.findMany({
+          where: { userId: ownerId, spaceId: actor.spaceId },
+          orderBy: { position: "asc" },
+        })
+      : [],
+    modelsEnabled ? findDefaultModelCredential(deps.prisma, actor) : null,
+    modelsEnabled
+      ? deps.prisma.bot.findMany({
+          where: {
+            spaceId: actor.spaceId,
+            archivedAt: null,
+            ...(botIds ? { id: { in: botIds } } : {}),
+          },
+          select: { modelProvider: true, modelId: true, thinkingLevel: true },
+        })
+      : [],
+    // An active routine with its own model is another recipient for this bot.
+    // A paused routine is included only when this check is for that routine,
+    // so it does not block an ordinary chat message.
+    modelsEnabled
+      ? deps.prisma.routine.findMany({
+          where: {
+            spaceId: actor.spaceId,
+            modelProvider: { not: null },
+            modelId: { not: null },
+            bot: { archivedAt: null },
+            ...(botIds ? { botId: { in: botIds } } : {}),
+            OR: query.routineId ? [{ active: true }, { id: query.routineId }] : [{ active: true }],
+          },
+          select: { modelProvider: true, modelId: true, thinkingLevel: true },
+        })
+      : [],
+    uses.includes("voice")
+      ? query.uses
+        ? findDefaultVoiceCredential(deps.prisma, actor).then((credential) =>
+            credential ? [{ credential }] : [],
+          )
+        : deps.prisma.spaceVoicePreference.findMany({
             where: { userId: ownerId, spaceId: actor.spaceId },
             include: { credential: true },
           })
-        : [],
-      modelsEnabled ? findDefaultModelCredential(deps.prisma, actor) : null,
-      modelsEnabled
-        ? deps.prisma.bot.findMany({
-            where: {
-              spaceId: actor.spaceId,
-              archivedAt: null,
-              ...(botIds ? { id: { in: botIds } } : {}),
-            },
-            select: { modelProvider: true, modelId: true, thinkingLevel: true },
-          })
-        : [],
-      uses.includes("voice")
-        ? query.uses
-          ? findDefaultVoiceCredential(deps.prisma, actor).then((credential) =>
-              credential ? [{ credential }] : [],
-            )
-          : deps.prisma.spaceVoicePreference.findMany({
-              where: { userId: ownerId, spaceId: actor.spaceId },
-              include: { credential: true },
-            })
-        : [],
-      uses.includes("memory")
-        ? deps.prisma.spaceMemoryConfig.findUnique({ where: { spaceId: actor.spaceId } })
-        : null,
-      modelsEnabled
-        ? deps.prisma.deploymentSettings.findUnique({ where: { id: "default" } })
-        : null,
-      deps.prisma.aiDataConsent.findMany({
-        where: { userId: actor.userId, spaceId: actor.spaceId, version: AI_DISCLOSURE_VERSION },
-      }),
-    ]);
+      : [],
+    uses.includes("memory")
+      ? deps.prisma.spaceMemoryConfig.findUnique({ where: { spaceId: actor.spaceId } })
+      : null,
+    modelsEnabled ? deps.prisma.deploymentSettings.findUnique({ where: { id: "default" } }) : null,
+    deps.prisma.aiDataConsent.findMany({
+      where: { userId: actor.userId, spaceId: actor.spaceId, version: AI_DISCLOSURE_VERSION },
+    }),
+  ]);
   const allowed = new Set(consents.map((row) => row.recipientKey));
   const recipients = new Map<string, AiRecipient>();
   const add = (recipient: ReturnType<typeof aiRecipient>) => {
@@ -80,17 +109,22 @@ export async function aiConsentStatus(
       recipients.set(recipient.key, { ...recipient, allowed: allowed.has(recipient.key) });
   };
   if (modelsEnabled) {
-    const deployment = deps.env.deploymentModelKey
+    const deployment = deps.env.deploymentModelConfigured
       ? { provider: deps.env.defaultProvider, model: deps.env.defaultModel }
       : null;
     const selected = await Promise.all(
-      (target ? bots : [null, ...bots]).map(async (bot) => {
+      (target ? [...bots, ...routines] : [null, ...bots, ...routines]).map(async (override) => {
         const overrideCredential =
-          bot?.modelProvider && bot.modelId
-            ? await findModelCredential(deps.prisma, actor, bot.modelProvider, bot.modelId)
+          override?.modelProvider && override.modelId
+            ? await findModelCredential(
+                deps.prisma,
+                actor,
+                override.modelProvider,
+                override.modelId,
+              )
             : null;
         return selectConfiguredModel({
-          bot,
+          override,
           overrideCredential,
           defaultCredential,
           settings,
@@ -111,6 +145,20 @@ export async function aiConsentStatus(
         },
         thinkingLevel: null,
       });
+    const backupModels = await Promise.all(
+      backups.map(async (backup) => {
+        const credential = await findModelCredential(
+          deps.prisma,
+          actor,
+          backup.provider,
+          backup.modelId,
+        );
+        return credential
+          ? { provider: backup.provider, id: backup.modelId, credential, thinkingLevel: null }
+          : null;
+      }),
+    );
+    selected.push(...backupModels.filter((model) => model !== null));
     if (deps.env.teamChatJudgeProvider && deps.env.teamChatJudgeModel) {
       selected.push({
         provider: deps.env.teamChatJudgeProvider,
