@@ -152,9 +152,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
           scopes: (optional(source.OIDC_SCOPES) ?? "openid email profile")
             .split(/[\s,]+/)
             .filter(Boolean),
-          // Fork default: the operator's identity provider decides who gets in,
-          // so the bypass is on unless OIDC_ALLOW_SIGNUP_BYPASS=false.
-          allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS !== "false",
+          allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
           // Fork: Shared Spaces from provider groups.
           groupSpaces: parseGroupSpaces(source.OIDC_GROUP_SPACES),
           groupsClaim: optional(source.OIDC_GROUPS_CLAIM) ?? "groups",

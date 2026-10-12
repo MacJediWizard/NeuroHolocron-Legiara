@@ -30,7 +30,6 @@ import type { OidcConfig } from "./oidc.js";
 import { oidcDiscovery } from "./oidc.js";
 
 export type { OidcConfig } from "./oidc.js";
-export { migrateOidcAccountIds } from "./oidc-account-migration.js";
 
 export interface AuthEnv {
   passwordAuth?: boolean;

@@ -7,24 +7,13 @@ and how it stays mergeable with upstream. Upstream changes are in [CHANGELOG.md]
 
 | Feature | Configure with | Docs |
 | --- | --- | --- |
-| SSO admits users without the signup allowlist by default (upstream SSO otherwise) | `OIDC_ALLOW_SIGNUP_BYPASS` (defaults to `true`) | [Self-hosting: SSO](./self-host.md#optional-openid-connect-sso) |
 | Shared Spaces: provider groups add members to a Space that they share with its owner | `OIDC_GROUP_SPACES`, `OIDC_GROUPS_CLAIM` | [Self-hosting: Shared Spaces](./self-host.md#shared-spaces-from-provider-groups) |
-| In-app secrets (model keys, integration credentials, bot secrets) kept in Infisical instead of Postgres | `SECRET_STORE=infisical` and `INFISICAL_*` | [Infisical: Legiara compatibility](./infisical-secrets.md#legiara-compatibility) |
 | Error reporting to Sentry or a Sentry-compatible collector such as GlitchTip, from the server and the web app | `SENTRY_DSN`, `SENTRY_BROWSER_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE` | [Self-hosting: Logging](./self-host.md#logging) |
 | Images, installer, and desktop updates published from this repository | `SOURCE_REPO` in `packages/contracts/src/brand.js` | [Published images and tags](./self-host.md#published-images-and-tags) |
 | CI that runs without upstream's paid services | Repository variables | [Fork CI](./fork-ci.md) |
 
 Every fork feature is off unless configured, so a deployment without these variables behaves like
 upstream.
-
-## Infisical secret store
-
-The Infisical store is upstream's. The fork keeps it compatible with stores set up by earlier
-Legiara releases and with other services that share the folder: it accepts `INFISICAL_SITE_URL`,
-`INFISICAL_SECRET_PATH` and `INFISICAL_REFRESH_SECONDS` as older names, writes keys as
-`SECRET_<record id>__v<time>_<random>`, and reads those keys, unversioned `SECRET_<record id>`
-keys and upstream `infisical:v1:` refs. Setup, migration and rollback are in
-[Infisical setup, migration, and rollback](./infisical-secrets.md).
 
 ## Staying mergeable with upstream
 
@@ -41,6 +30,20 @@ keys and upstream `infisical:v1:` refs. Setup, migration and rollback are in
 
 A release commit bumps `apps/desktop/package.json` and is tagged `vX.Y.Z`. The tag publishes the
 `app` and `computer` images under that version and `latest`; `main` publishes `edge`.
+
+### Unreleased
+
+- Upstream sync. SSO and the Infisical secret store now match upstream exactly:
+  - `OIDC_ALLOW_SIGNUP_BYPASS` defaults to `false`, so SSO signups follow the allowlist unless it
+    is set to `true`.
+  - The startup rewrite of raw-subject OIDC account ids is gone.
+  - The Infisical store reads only `INFISICAL_URL`, `INFISICAL_FOLDER` and upstream refs. The
+    older names, `SECRET_STORE=database` and fork-format keys are no longer read.
+- Kept from the fork: Shared Spaces from provider groups, and Space-wide bots, secrets and owner
+  credentials. Also kept: memory, scratchpad and ticket context sent as per-turn blocks, and stable
+  prompt-cache breakpoints on history, so the system prompt stays cacheable.
+- Error reporting: the Sentry sink redacts what it sends, browser errors caught before the SDK
+  loads are queued and sent, and the source-map upload step reruns when its configuration changes.
 
 ### v0.1.10
 

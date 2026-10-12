@@ -94,17 +94,6 @@ check that `SANDBOX_SUPERVISOR_TOKEN` is set and non-empty for the Docker
 computer path. A missing token is a setup failure, not an "optional tighten
 later" item.
 
-## Keeping in-app secrets in Infisical (optional)
-
-By default, credentials that users save in the app (model keys, MCP and
-webhook secrets, bot credentials, integration settings) are encrypted with
-`ENCRYPTION_KEY` and stored in Postgres. Set `SECRET_STORE=infisical` and the
-`INFISICAL_*` keys on the API and worker to keep them in Infisical instead, so
-operators can view, rotate and audit them there. `ENCRYPTION_KEY` is still
-required. Setup, key format, the older `INFISICAL_SITE_URL` and
-`INFISICAL_SECRET_PATH` names, migration and rollback are in
-[Infisical setup, migration, and rollback](./infisical-secrets.md).
-
 ## Recovery without reprinting secrets
 
 - Lost UI password: use SMTP recovery if configured; otherwise operator

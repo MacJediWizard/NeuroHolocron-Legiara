@@ -57,23 +57,6 @@ cleanup before revoking machine-identity access; there is no age-based pruning.
 A process crash between the external write and database persistence can leave an
 unreferenced key; reconcile such keys against database refs during maintenance.
 
-## Legiara compatibility
-
-Deployments configured for an earlier Legiara release keep working. These older names are read
-when the newer one is unset or empty:
-
-| Older name | Same as |
-| --- | --- |
-| `INFISICAL_SITE_URL` | `INFISICAL_URL` |
-| `INFISICAL_SECRET_PATH` | `INFISICAL_FOLDER` |
-| `INFISICAL_REFRESH_SECONDS` | The cache lifetime, in seconds |
-| `SECRET_STORE=database` | `SECRET_STORE=encrypted` |
-
-New writes use the key `SECRET_<record id>__v<time>_<random>`, with any character other than a
-letter or digit in the record id replaced by `_`, and the row holds `infisical:<key>`. The secret
-comment says what the value is. Unversioned `infisical:SECRET_<record id>` refs from earlier
-releases and `infisical:v1:` refs both still load. A key bound to a different record is refused.
-
 ## Availability
 
 API and worker start even if Infisical login fails. Encrypted refs continue to

@@ -200,7 +200,7 @@ OIDC_CLIENT_SECRET=replace-with-client-secret
 OIDC_NAME=SSO
 OIDC_SCOPES=openid email profile
 AUTH_PASSWORD_ENABLED=true
-OIDC_ALLOW_SIGNUP_BYPASS=true
+OIDC_ALLOW_SIGNUP_BYPASS=false
 ```
 
 The issuer must be HTTPS and exactly match the discovery document's issuer. Legiara loads
@@ -236,10 +236,9 @@ still apply. Restoring the old issuer makes its existing links usable again.
 
 SSO signup follows closed registration and the deployment allowlist before creating an account.
 Allowlisted provider emails must be verified; the password signup's first-account exemption
-never upgrades an OIDC email. `OIDC_ALLOW_SIGNUP_BYPASS=true` admits IdP identities
-without applying the allowlist or its email-verification admission requirement. In this fork it
-defaults to `true` when unset, because the IdP controls who may join; set it to `false` to apply
-the allowlist to SSO signups. It does **not** reopen closed registration,
+never upgrades an OIDC email. `OIDC_ALLOW_SIGNUP_BYPASS=true` explicitly admits IdP identities
+without applying the allowlist or its email-verification admission requirement. Enable it only
+when the IdP controls who may join this deployment. It does **not** reopen closed registration,
 and does not change email verification claims or linking rules. Existing admitted accounts can
 sign in while registration is closed.
 
@@ -258,9 +257,6 @@ deletion or create another account in that flow. A stale or borrowed session alo
 email configured, **Send deletion code** sends a single-use code to the account email, valid for ten
 minutes. Enter it in account settings to confirm deletion. Email-code requests are rate-limited;
 invalid, expired or wrong-account codes fail. No password needs to be created for deletion.
-
-Accounts that an earlier Legiara release linked by the raw provider subject are rewritten to the
-issuer-bound id when the API starts, so those users keep signing in to the same account.
 
 #### Shared Spaces from provider groups
 

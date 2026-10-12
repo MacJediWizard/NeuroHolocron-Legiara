@@ -8,7 +8,7 @@ import type {
 } from "@rakazo/adapter-kit";
 import { getLogger } from "@rakazo/logging";
 import type { InfisicalSecretStoreOptions } from "./infisical-secret-store.js";
-import { InfisicalSecretStore, isInfisicalRef } from "./infisical-secret-store.js";
+import { INFISICAL_REF_PREFIX, InfisicalSecretStore } from "./infisical-secret-store.js";
 import { SecretChanges } from "./secret-changes.js";
 import { EncryptedSecretStore } from "./secrets.js";
 
@@ -16,17 +16,14 @@ export function secretStoreOptionsFromEnv(
   source: NodeJS.ProcessEnv,
 ): InfisicalSecretStoreOptions | undefined {
   const provider = source.SECRET_STORE?.trim() || "encrypted";
-  // Fork alias: "database" was the fork's name for the encrypted store.
-  if (provider === "encrypted" || provider === "database") return undefined;
+  if (provider === "encrypted") return undefined;
   if (provider !== "infisical") throw new Error("Unsupported SECRET_STORE");
-  // Fork aliases: some deployments use INFISICAL_SITE_URL / INFISICAL_SECRET_PATH.
-  // Compose injects empty strings for unset vars, so an empty upstream name falls through too.
-  const required = (name: string, alias?: string) => {
-    const value = source[name]?.trim() || (alias ? source[alias]?.trim() : undefined);
-    if (!value) throw new Error(alias ? `Missing ${name} (or ${alias})` : `Missing ${name}`);
+  const required = (name: string) => {
+    const value = source[name]?.trim();
+    if (!value) throw new Error(`Missing ${name}`);
     return value;
   };
-  const baseUrl = required("INFISICAL_URL", "INFISICAL_SITE_URL");
+  const baseUrl = required("INFISICAL_URL");
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -47,7 +44,7 @@ export function secretStoreOptionsFromEnv(
     /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(url.hostname);
   if (url.protocol === "http:" && !loopback && source.INFISICAL_ALLOW_INSECURE_HTTP !== "true")
     throw new Error("INFISICAL_URL requires HTTPS or INFISICAL_ALLOW_INSECURE_HTTP=true");
-  const folder = required("INFISICAL_FOLDER", "INFISICAL_SECRET_PATH");
+  const folder = required("INFISICAL_FOLDER");
   if (!folder.startsWith("/")) throw new Error("INFISICAL_FOLDER must start with /");
   return {
     baseUrl,
@@ -56,22 +53,8 @@ export function secretStoreOptionsFromEnv(
     projectId: required("INFISICAL_PROJECT_ID"),
     environment: required("INFISICAL_ENVIRONMENT"),
     folder,
-    ...refreshTtl(source),
   };
 }
-
-/** Fork alias: INFISICAL_REFRESH_SECONDS was the fork's cache refresh period. */
-function refreshTtl(source: NodeJS.ProcessEnv): { cacheTtlMs?: number } {
-  const raw = source.INFISICAL_REFRESH_SECONDS?.trim();
-  if (!raw) return {};
-  const seconds = Number(raw);
-  if (!Number.isFinite(seconds) || seconds <= 0)
-    throw new Error("INFISICAL_REFRESH_SECONDS must be a positive number");
-  return { cacheTtlMs: seconds * 1000 };
-}
-
-/** Fork: topic an external writer notifies (via pg_notify) after it writes a key. */
-const LEGACY_CHANGED_TOPIC = "secret-store:changed";
 
 /** Routing is private to the store; consumers only see opaque refs. */
 export class ComposedSecretStore extends SecretChanges implements SecretStore {
@@ -79,7 +62,6 @@ export class ComposedSecretStore extends SecretChanges implements SecretStore {
   private closed = false;
   private starting?: Promise<void>;
   private unsubscribe?: () => Promise<void>;
-  private unsubscribeLegacy?: () => Promise<void>;
   private readonly subscriptions: Array<() => void> = [];
   constructor(
     private readonly encrypted: SecretStore,
@@ -106,18 +88,14 @@ export class ComposedSecretStore extends SecretChanges implements SecretStore {
         try {
           const event = JSON.parse(payload);
           if (event.origin !== this.origin && typeof event.ref === "string") {
-            if (this.remote && isInfisicalRef(event.ref)) this.remote.invalidate(event.ref);
+            if (this.remote && event.ref.startsWith(INFISICAL_REF_PREFIX))
+              this.remote.invalidate(event.ref);
             else this.changed(event.ref);
           }
         } catch {
           /* Ignore malformed notifications. */
         }
       });
-    const remote = this.remote;
-    if (this.realtime && remote && !this.closed)
-      this.unsubscribeLegacy = await this.realtime.subscribe(LEGACY_CHANGED_TOPIC, () =>
-        remote.dropCache(),
-      );
   }
   private async publish(ref: string): Promise<void> {
     try {
@@ -139,14 +117,16 @@ export class ComposedSecretStore extends SecretChanges implements SecretStore {
     return record;
   }
   load(ref: string, context: SecretContext): Promise<string> {
-    return (isInfisicalRef(ref) && this.remote ? this.remote : this.encrypted).load(ref, context);
+    return (
+      ref.startsWith(INFISICAL_REF_PREFIX) && this.remote ? this.remote : this.encrypted
+    ).load(ref, context);
   }
   async delete(ref: string, context: SecretContext): Promise<void> {
     try {
-      await (isInfisicalRef(ref) && this.remote ? this.remote : this.encrypted).delete(
-        ref,
-        context,
-      );
+      await (ref.startsWith(INFISICAL_REF_PREFIX) && this.remote
+        ? this.remote
+        : this.encrypted
+      ).delete(ref, context);
     } finally {
       await this.publish(ref);
     }
@@ -162,12 +142,10 @@ export class ComposedSecretStore extends SecretChanges implements SecretStore {
     await this.starting?.catch(() => undefined);
     try {
       await this.unsubscribe?.();
-      await this.unsubscribeLegacy?.();
     } catch {
       getLogger().warn("Secret notification shutdown failed");
     }
     this.unsubscribe = undefined;
-    this.unsubscribeLegacy = undefined;
     await this.encrypted.close();
     this.clearListeners();
   }

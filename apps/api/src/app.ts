@@ -71,12 +71,7 @@ import {
   toTeamChatInbound,
   withSecretPersistence,
 } from "@rakazo/adapters";
-import {
-  createAuth,
-  isBlockedAuthPath,
-  loopbackTwinOrigins,
-  migrateOidcAccountIds,
-} from "@rakazo/auth";
+import { createAuth, isBlockedAuthPath, loopbackTwinOrigins } from "@rakazo/auth";
 import type { Actor, AuthCapabilities } from "@rakazo/contracts";
 import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
@@ -397,14 +392,6 @@ export async function createApp(
   const notifications = new ExpoPushProvider(env.dataDir, (sessionId) =>
     pushSessionExpiresAt(prisma, sessionId),
   );
-  // Fork: rewrite pre-sync OIDC account ids (raw sub) to upstream's issuer-bound
-  // subject before any sign-in. Idempotent, so it runs at every startup.
-  if (env.oidc) {
-    const { migrated } = await migrateOidcAccountIds(prisma, env.oidc.issuer, (message, details) =>
-      logger.warn(message, details),
-    );
-    if (migrated > 0) logger.info("Migrated OIDC account ids", { migrated });
-  }
   const auth = createAuth(prisma, {
     passwordAuth: env.passwordAuth,
     // Fork: report group mappings that name a missing Space.

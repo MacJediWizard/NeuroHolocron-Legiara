@@ -253,15 +253,15 @@ describe("OIDC environment", () => {
     expect(() => loadEnv({ ...base, AUTH_PASSWORD_ENABLED: "false" })).toThrow(/requires OIDC/);
     expect(loadEnv({ ...base, ...oidc, AUTH_PASSWORD_ENABLED: "false" }).passwordAuth).toBe(false);
   });
-  it("defaults to SSO with the fork's policy bypass on", () => {
+  it("defaults to SSO with no policy bypass", () => {
     expect(loadEnv({ ...base, ...oidc }).oidc).toMatchObject({
       name: "SSO",
-      allowSignupBypass: true,
+      allowSignupBypass: false,
       scopes: ["openid", "email", "profile"],
     });
     expect(
-      loadEnv({ ...base, ...oidc, OIDC_ALLOW_SIGNUP_BYPASS: "false" }).oidc?.allowSignupBypass,
-    ).toBe(false);
+      loadEnv({ ...base, ...oidc, OIDC_ALLOW_SIGNUP_BYPASS: "true" }).oidc?.allowSignupBypass,
+    ).toBe(true);
   });
   it("loads group Spaces only alongside an OIDC provider", () => {
     expect(loadEnv({ ...base, ...oidc }).oidc).toMatchObject({

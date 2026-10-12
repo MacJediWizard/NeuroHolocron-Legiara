@@ -1,10 +1,9 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import type * as Db from "@rakazo/db";
-import { syncGroupSpaces } from "@rakazo/db";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Auth, AuthEnv } from "./index.js";
-import { createAuth, migrateOidcAccountIds } from "./index.js";
+import { createAuth } from "./index.js";
 import { isCurrentOidcAccount, oidcAccountSubject } from "./oidc.js";
 
 const state = vi.hoisted(() => ({ db: {} as Record<string, Record<string, unknown>[]> }));
@@ -643,82 +642,4 @@ it("counts only stored OIDC subjects bound to the current issuer", () => {
   expect(isCurrentOidcAccount({ ...account, accountId: "unbound" }, issuer)).toBe(false);
   expect(isCurrentOidcAccount({ ...account, idToken: null }, issuer)).toBe(false);
   expect(isCurrentOidcAccount({ ...account, idToken: "malformed" }, issuer)).toBe(false);
-});
-
-describe("fork: OIDC account-id migration", () => {
-  const groupSpaces = [{ group: "engineering", spaceId: "space-1" }];
-  const accountStore = {
-    account: {
-      findMany: async ({ where }: { where: { providerId: string } }) =>
-        rows("account")
-          .filter((row) => row.providerId === where.providerId)
-          .map((row) => ({ id: row.id, accountId: row.accountId, idToken: row.idToken ?? null })),
-      update: async ({ where, data }: { where: { id: string }; data: object }) =>
-        Object.assign(rows("account").find((row) => row.id === where.id)!, data),
-    },
-  } as never;
-
-  it("lets a fork raw-sub account sign in again and syncs its group Spaces", async () => {
-    setup({
-      oidc: {
-        issuer,
-        clientId: "test-client",
-        clientSecret: "test-client-secret",
-        name: "SSO",
-        scopes: [],
-        allowSignupBypass: true,
-        groupSpaces,
-      },
-    });
-    const claims = {
-      sub: "subject-1",
-      email: "sso@example.test",
-      email_verified: true,
-      groups: ["engineering"],
-    };
-    expect((await signIn(claims)).headers.get("location")).toBe(`${origin}/app`);
-    // The fork stored the raw ID token subject as the account id.
-    const account = rows("account")[0]!;
-    account.accountId = "subject-1";
-    cookies = "";
-    expect((await signIn(claims)).headers.get("location")).toContain("error=account_not_linked");
-
-    await expect(migrateOidcAccountIds(accountStore, issuer)).resolves.toEqual({ migrated: 1 });
-    expect(account.accountId).toBe(oidcAccountSubject(issuer, "subject-1"));
-    await expect(migrateOidcAccountIds(accountStore, issuer)).resolves.toEqual({ migrated: 0 });
-
-    vi.mocked(syncGroupSpaces).mockClear();
-    cookies = "";
-    expect((await signIn(claims)).headers.get("location")).toBe(`${origin}/app`);
-    expect(rows("user")).toHaveLength(1);
-    expect(rows("account")).toHaveLength(1);
-    expect(syncGroupSpaces).toHaveBeenCalledWith(
-      expect.anything(),
-      rows("user")[0]!.id,
-      ["engineering"],
-      groupSpaces,
-    );
-  });
-
-  it("leaves rows without an ID token, from another issuer, or unreadable alone", async () => {
-    const token = (claims: object) =>
-      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
-    const update = vi.fn();
-    const log = vi.fn();
-    const prisma = {
-      account: {
-        findMany: vi.fn(async () => [
-          { id: "a", accountId: "s1", idToken: null },
-          { id: "b", accountId: "s2", idToken: token({ iss: "https://other.test", sub: "s2" }) },
-          { id: "c", accountId: "s3", idToken: "garbage" },
-        ]),
-        update,
-      },
-    };
-    await expect(migrateOidcAccountIds(prisma as never, issuer, log)).resolves.toEqual({
-      migrated: 0,
-    });
-    expect(update).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith(expect.any(String), { accountRowId: "a" });
-  });
 });
